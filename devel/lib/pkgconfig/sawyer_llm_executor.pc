@@ -1,0 +1,8 @@
+prefix=/home/sauman25/ros_ws/devel
+
+Name: sawyer_llm_executor
+Description: Description of sawyer_llm_executor
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

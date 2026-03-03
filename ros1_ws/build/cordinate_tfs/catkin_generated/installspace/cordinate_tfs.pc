@@ -1,0 +1,8 @@
+prefix=/home/sauman25/ros_ws/ros1_ws/install
+
+Name: cordinate_tfs
+Description: Description of cordinate_tfs
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 
