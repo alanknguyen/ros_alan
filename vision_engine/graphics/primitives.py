@@ -265,6 +265,96 @@ def make_axis_triad(length: float = 0.1) -> np.ndarray:
     ], dtype=np.float32)
 
 
+def make_cs100_lshape(
+    marker_positions: np.ndarray,
+    marker_radius: float = 0.008,
+    corner_color: Tuple[float, float, float] = (1.0, 1.0, 0.0),
+    short_arm_color: Tuple[float, float, float] = (1.0, 0.5, 0.0),
+    long_arm_color: Tuple[float, float, float] = (0.0, 1.0, 0.0),
+    line_color: Tuple[float, float, float] = (0.9, 0.9, 0.9),
+    sphere_rings: int = 12,
+    sphere_sectors: int = 16,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Generate vertex data for the CS-100 L-shape: 3 spheres + 2 connecting lines.
+
+    All vertices are in world space (use identity model matrix at render time).
+
+    Parameters
+    ----------
+    marker_positions : np.ndarray, shape (3, 3)
+        World positions: [corner, short_arm, long_arm].
+    marker_radius : float
+        Display radius of each marker sphere (meters).
+    corner_color : tuple
+        RGB color for the corner marker.
+    short_arm_color : tuple
+        RGB color for the 8cm arm marker.
+    long_arm_color : tuple
+        RGB color for the 10cm arm marker.
+    line_color : tuple
+        RGB color for the connecting lines.
+    sphere_rings : int
+        Sphere tessellation rings.
+    sphere_sectors : int
+        Sphere tessellation sectors.
+
+    Returns
+    -------
+    solid_verts : np.ndarray, shape (N, 9)
+        Vertex data [x, y, z, nx, ny, nz, r, g, b] for Phong shader.
+    line_verts : np.ndarray, shape (M, 6)
+        Vertex data [x, y, z, r, g, b] for Flat shader.
+    """
+    colors = [corner_color, short_arm_color, long_arm_color]
+    all_solid = []
+
+    for i in range(3):
+        cx, cy, cz = marker_positions[i]
+        r_c, g_c, b_c = colors[i]
+
+        for ri in range(sphere_rings):
+            theta0 = np.pi * ri / sphere_rings
+            theta1 = np.pi * (ri + 1) / sphere_rings
+
+            for sj in range(sphere_sectors):
+                phi0 = 2.0 * np.pi * sj / sphere_sectors
+                phi1 = 2.0 * np.pi * (sj + 1) / sphere_sectors
+
+                def sp(theta, phi):
+                    nx = np.sin(theta) * np.cos(phi)
+                    ny = np.sin(theta) * np.sin(phi)
+                    nz = np.cos(theta)
+                    x = cx + marker_radius * nx
+                    y = cy + marker_radius * ny
+                    z = cz + marker_radius * nz
+                    return [x, y, z, nx, ny, nz, r_c, g_c, b_c]
+
+                p00 = sp(theta0, phi0)
+                p10 = sp(theta1, phi0)
+                p11 = sp(theta1, phi1)
+                p01 = sp(theta0, phi1)
+                all_solid.extend([p00, p10, p11, p00, p11, p01])
+
+    solid_verts = np.array(all_solid, dtype=np.float32)
+
+    # Lines: corner → short arm, corner → long arm
+    corner = marker_positions[0]
+    short_arm = marker_positions[1]
+    long_arm = marker_positions[2]
+    lr, lg, lb = line_color
+
+    line_data = [
+        [*corner, lr, lg, lb],
+        [*short_arm, lr, lg, lb],
+        [*corner, lr, lg, lb],
+        [*long_arm, lr, lg, lb],
+    ]
+    line_verts = np.array(line_data, dtype=np.float32)
+
+    return solid_verts, line_verts
+
+
 def make_wireframe_box(
     x_min: float, x_max: float,
     y_min: float, y_max: float,

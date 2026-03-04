@@ -106,12 +106,18 @@ workspace:
 # Add entries here for every rigid body you create in Motive.
 # Objects not listed here will render as small gray spheres with mass=0.1 kg.
 objects:
-  # OptiTrack CS-100 Calibration Square (165mm square, ~10mm thick plate)
-  # This is the primary tracking target during initial setup.
+  # OptiTrack CS-100 Calibration Square — L-shape with 3 retroreflective markers.
+  # Corner marker at L vertex, short arm = 8cm, long arm = 10cm (perpendicular).
+  # Rendered as 3 colored spheres + connecting lines in the 3D view.
   CS-100:
-    shape: "cube"
-    size: [0.165, 0.165, 0.01]
-    color: [0.8, 0.8, 0.0]       # Yellow
+    render_as: "cs100_lshape"
+    short_arm_length: 0.08        # meters (corner to 8cm marker)
+    long_arm_length: 0.10         # meters (corner to 10cm marker)
+    marker_radius: 0.008          # meters (display sphere radius)
+    corner_color: [1.0, 1.0, 0.0]      # Yellow — corner marker
+    short_arm_color: [1.0, 0.5, 0.0]   # Orange — 8cm arm marker
+    long_arm_color: [0.0, 1.0, 0.0]    # Green — 10cm arm marker
+    line_color: [0.9, 0.9, 0.9]        # White — connecting lines
     mass: 0.2
     is_calibration_tool: true     # Excluded from physics predictions
 
@@ -170,3 +176,16 @@ physics:
   gravity: -9.81
   step_rate: 240
   gripper_width: 0.08
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Depth Estimation Settings
+# ─────────────────────────────────────────────────────────────────────────────
+# Used by run_calibration.py --mode depth to estimate camera-to-floor distance.
+# The CS-100 is placed flat on the floor and its known L-shape geometry
+# (8cm + 10cm edges) validates tracking accuracy and computes the floor plane.
+depth_estimation:
+  cs100_body: "CS-100"
+  num_samples: 60                 # Frames to average for floor measurement
+  flatness_threshold_deg: 5.0     # Max tilt before warning (should be ~0 on flat floor)
+  distance_tolerance_mm: 2.0      # Max marker distance error for validation

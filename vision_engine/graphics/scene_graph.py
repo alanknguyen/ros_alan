@@ -20,6 +20,7 @@ from typing import Dict, Optional, Tuple
 from graphics.primitives import (
     make_cube, make_cylinder, make_sphere,
     make_grid, make_axis_triad, make_wireframe_box,
+    make_cs100_lshape,
 )
 from cv.transforms import quaternion_to_rotation_matrix
 
@@ -60,6 +61,12 @@ class SceneGraph:
 
         # Primitive mesh cache: shape_key → (vao, vertex_count)
         self._mesh_cache: Dict[str, Tuple[moderngl.VertexArray, int]] = {}
+
+        # CS-100 L-shape rendering
+        self._cs100_solid_vao: Optional[moderngl.VertexArray] = None
+        self._cs100_solid_count: int = 0
+        self._cs100_lines_vao: Optional[moderngl.VertexArray] = None
+        self._cs100_lines_count: int = 0
 
         # Gripper indicator
         self._gripper_vao: Optional[moderngl.VertexArray] = None
@@ -233,6 +240,56 @@ class SceneGraph:
         self._gripper_model[2, 2] = scale
         self._gripper_model[:3, 3] = np.array(position, dtype=np.float32)
 
+    def update_cs100(
+        self,
+        marker_positions: np.ndarray,
+        shape_info: dict = None,
+    ) -> None:
+        """
+        Update the CS-100 L-shape rendering with new marker positions.
+
+        Parameters
+        ----------
+        marker_positions : np.ndarray, shape (3, 3)
+            World positions: [corner, short_arm, long_arm].
+        shape_info : dict or None
+            Config with color/radius overrides.
+        """
+        if shape_info is None:
+            shape_info = {}
+
+        solid_verts, line_verts = make_cs100_lshape(
+            marker_positions,
+            marker_radius=shape_info.get("marker_radius", 0.008),
+            corner_color=tuple(shape_info.get("corner_color", [1.0, 1.0, 0.0])),
+            short_arm_color=tuple(shape_info.get("short_arm_color", [1.0, 0.5, 0.0])),
+            long_arm_color=tuple(shape_info.get("long_arm_color", [0.0, 1.0, 0.0])),
+            line_color=tuple(shape_info.get("line_color", [0.9, 0.9, 0.9])),
+        )
+
+        # Upload solid vertices (Phong shader: pos + normal + color)
+        solid_bytes = solid_verts.tobytes()
+        if self._cs100_solid_vao is not None:
+            # Release old buffers
+            self._cs100_solid_vao.release()
+        vbo_solid = self.ctx.buffer(solid_bytes)
+        self._cs100_solid_vao = self.ctx.vertex_array(
+            self.phong_program,
+            [(vbo_solid, "3f 3f 3f", "in_position", "in_normal", "in_color")],
+        )
+        self._cs100_solid_count = len(solid_verts)
+
+        # Upload line vertices (Flat shader: pos + color)
+        line_bytes = line_verts.tobytes()
+        if self._cs100_lines_vao is not None:
+            self._cs100_lines_vao.release()
+        vbo_lines = self.ctx.buffer(line_bytes)
+        self._cs100_lines_vao = self.ctx.vertex_array(
+            self.flat_program,
+            [(vbo_lines, "3f 3f", "in_position", "in_color")],
+        )
+        self._cs100_lines_count = len(line_verts)
+
     def remove_rigid_body(self, name: str) -> None:
         """Remove a rigid body from the scene."""
         self._objects.pop(name, None)
@@ -282,6 +339,12 @@ class SceneGraph:
             self.flat_program["u_model"].write(model.tobytes())
             self._bounds_vao.render(moderngl.LINES)
 
+        # CS-100 L-shape lines
+        if self._cs100_lines_vao is not None:
+            model = np.eye(4, dtype=np.float32)
+            self.flat_program["u_model"].write(model.tobytes())
+            self._cs100_lines_vao.render(moderngl.LINES)
+
         # ── Phong shader objects (rigid bodies, gripper) ──
         self.phong_program["u_view"].write(view_matrix.astype(np.float32).tobytes())
         self.phong_program["u_projection"].write(projection_matrix.astype(np.float32).tobytes())
@@ -297,6 +360,12 @@ class SceneGraph:
         self.phong_program["u_camera_pos"].write(
             camera_position.astype(np.float32).tobytes()
         )
+
+        # CS-100 L-shape marker spheres
+        if self._cs100_solid_vao is not None:
+            model = np.eye(4, dtype=np.float32)
+            self.phong_program["u_model"].write(model.tobytes())
+            self._cs100_solid_vao.render(moderngl.TRIANGLES)
 
         # Rigid bodies
         for name, (vao, vertex_count, model) in self._objects.items():

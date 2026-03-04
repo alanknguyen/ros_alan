@@ -48,6 +48,7 @@ import cv2
 from utils import load_config, load_calibration, is_calibration_tool
 from cv.optitrack_client import OptiTrackClient, RigidBodyState
 from cv.scene_state import SceneStateAggregator, SceneSnapshot
+from cv.cs100_model import CS100Geometry
 from cv.annotator import SceneAnnotator
 from cv.scene_to_language import SceneDescriber
 from graphics.renderer import SceneRenderer
@@ -56,9 +57,24 @@ from physics.predictions import PhysicsPredictor
 from physics.body_registry import BodyRegistry
 
 
+def create_cs100_model(objects_cfg: dict) -> CS100Geometry:
+    """Create CS100Geometry from config if any object uses cs100_lshape rendering."""
+    for name, info in objects_cfg.items():
+        if info.get("render_as") == "cs100_lshape":
+            return CS100Geometry(
+                short_arm_length=info.get("short_arm_length", 0.08),
+                long_arm_length=info.get("long_arm_length", 0.10),
+            )
+    return None
+
+
 def create_demo_snapshot() -> SceneSnapshot:
     """Animated demo snapshot for testing without OptiTrack."""
     t = time.time()
+    angle = t * 0.5
+    qz = np.sin(angle * 0.5)
+    qw = np.cos(angle * 0.5)
+
     bodies = {
         "CS-100": RigidBodyState(
             name="CS-100", id=1,
@@ -67,7 +83,7 @@ def create_demo_snapshot() -> SceneSnapshot:
                 0.1 * np.cos(t * 0.3),
                 0.005,
             ]),
-            quaternion=np.array([0.0, 0.0, np.sin(t * 0.2) * 0.1, 1.0]),
+            quaternion=np.array([0.0, 0.0, qz, qw]),
             timestamp=t, tracking_valid=True,
         ),
         "cube_1": RigidBodyState(
@@ -176,12 +192,16 @@ def main():
         )
         time.sleep(1.0)
 
-    # 2. OpenGL renderer
+    # 2. CS-100 geometry model
+    cs100_model = create_cs100_model(objects_cfg)
+
+    # 3. OpenGL renderer
     renderer = SceneRenderer(
         width=renderer_cfg.get("window_width", 1280),
         height=renderer_cfg.get("window_height", 720),
         headless=args.headless,
         background_color=tuple(renderer_cfg.get("background_color", [0.15, 0.15, 0.15])),
+        cs100_model=cs100_model,
     )
     renderer.setup_scene(workspace_cfg)
 

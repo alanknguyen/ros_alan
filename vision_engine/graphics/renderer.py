@@ -61,11 +61,13 @@ class SceneRenderer:
         headless: bool = False,
         title: str = "Vision Engine — 3D Scene",
         background_color: tuple = (0.15, 0.15, 0.15),
+        cs100_model=None,
     ):
         self.width = width
         self.height = height
         self.headless = headless
         self.background_color = background_color
+        self._cs100_model = cs100_model
 
         self._window = None
         self._ctx: Optional[moderngl.Context] = None
@@ -227,12 +229,21 @@ class SceneRenderer:
                 "mass": 0.1,
             })
 
-            self._scene.update_rigid_body(
-                name=name,
-                position=body.position,
-                quaternion=body.quaternion,
-                shape_info=shape_info,
-            )
+            # Route CS-100 L-shape objects to dedicated renderer
+            if (shape_info.get("render_as") == "cs100_lshape"
+                    and self._cs100_model is not None):
+                marker_positions = self._cs100_model.compute_marker_positions(
+                    body.position, body.quaternion,
+                )
+                self._scene.update_cs100(marker_positions, shape_info)
+            else:
+                self._scene.update_rigid_body(
+                    name=name,
+                    position=body.position,
+                    quaternion=body.quaternion,
+                    shape_info=shape_info,
+                )
+
             valid_positions.append(body.position)
 
         # Auto-center camera on tracked objects
