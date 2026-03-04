@@ -72,11 +72,12 @@ class RecordedFrame:
     __slots__ = (
         "timestamp", "position", "quaternion", "marker_positions",
         "surface_normal", "height_above_table", "tilt_angle_deg",
+        "tracking_quality",
     )
 
     def __init__(self, timestamp, position, quaternion, marker_positions,
                  surface_normal=None, height_above_table=0.0,
-                 tilt_angle_deg=0.0):
+                 tilt_angle_deg=0.0, tracking_quality="good"):
         self.timestamp = timestamp
         self.position = position
         self.quaternion = quaternion
@@ -84,6 +85,7 @@ class RecordedFrame:
         self.surface_normal = surface_normal
         self.height_above_table = height_above_table
         self.tilt_angle_deg = tilt_angle_deg
+        self.tracking_quality = tracking_quality  # "good" or "stale"
 
 
 class TableCalibration:
@@ -322,10 +324,12 @@ def draw_trail_topdown(canvas, mapper, frames, end_idx, scene_h):
 
 
 def draw_lshape_topdown(canvas, mapper, frame, scene_h):
-    """Draw the L-shape with filled triangle colored by tilt."""
+    """Draw the L-shape with filled triangle colored by tilt.
+    Stale frames drawn with hollow markers and dimmed colors."""
     if frame is None or frame.marker_positions is None:
         return
 
+    is_stale = getattr(frame, "tracking_quality", "good") == "stale"
     mpx = [mapper.to_pixel(m[0], m[1]) for m in frame.marker_positions]
 
     # Check bounds
@@ -337,36 +341,46 @@ def draw_lshape_topdown(canvas, mapper, frame, scene_h):
     tri_pts = np.array(mpx, dtype=np.int32)
     overlay = canvas.copy()
     fill_col = tilt_color(frame.tilt_angle_deg)
+    if is_stale:
+        # Dim the fill color for stale frames
+        fill_col = tuple(c // 3 for c in fill_col)
     cv2.fillPoly(overlay, [tri_pts], fill_col)
-    cv2.addWeighted(overlay, 0.25, canvas, 0.75, 0, canvas)
+    cv2.addWeighted(overlay, 0.15 if is_stale else 0.25, canvas,
+                    0.85 if is_stale else 0.75, 0, canvas)
 
     # Triangle edges
-    cv2.line(canvas, mpx[0], mpx[1], COL_LINE, 1, cv2.LINE_AA)
-    cv2.line(canvas, mpx[0], mpx[2], COL_LINE, 1, cv2.LINE_AA)
-    cv2.line(canvas, mpx[1], mpx[2], (100, 100, 100), 1, cv2.LINE_AA)
+    edge_col = (80, 80, 80) if is_stale else COL_LINE
+    cv2.line(canvas, mpx[0], mpx[1], edge_col, 1, cv2.LINE_AA)
+    cv2.line(canvas, mpx[0], mpx[2], edge_col, 1, cv2.LINE_AA)
+    cv2.line(canvas, mpx[1], mpx[2], (60, 60, 60) if is_stale
+             else (100, 100, 100), 1, cv2.LINE_AA)
 
-    # Marker dots
+    # Marker dots — hollow if stale, filled if good
     for i, (px, py) in enumerate(mpx):
-        cv2.circle(canvas, (px, py), 7, MARKER_COLORS[i], -1, cv2.LINE_AA)
-        cv2.circle(canvas, (px, py), 7, (255, 255, 255), 1, cv2.LINE_AA)
+        col = tuple(c // 2 for c in MARKER_COLORS[i]) if is_stale \
+            else MARKER_COLORS[i]
+        if is_stale:
+            cv2.circle(canvas, (px, py), 7, col, 1, cv2.LINE_AA)
+        else:
+            cv2.circle(canvas, (px, py), 7, col, -1, cv2.LINE_AA)
+            cv2.circle(canvas, (px, py), 7, (255, 255, 255), 1, cv2.LINE_AA)
         cv2.putText(canvas, MARKER_LABELS[i], (px + 10, py - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, MARKER_COLORS[i], 1,
-                    cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, col, 1, cv2.LINE_AA)
 
     # Surface normal projected onto XY (short arrow from centroid)
-    if frame.surface_normal is not None:
+    if frame.surface_normal is not None and not is_stale:
         cx, cy = mapper.to_pixel(frame.position[0], frame.position[1])
-        # Normal projection onto XY plane
         nx, ny = frame.surface_normal[0], frame.surface_normal[1]
-        scale = 25  # pixels
+        scale = 25
         ex = int(cx + nx * scale)
-        ey = int(cy - ny * scale)  # Y flipped
+        ey = int(cy - ny * scale)
         cv2.arrowedLine(canvas, (cx, cy), (ex, ey), COL_NORMAL, 2,
                         cv2.LINE_AA, tipLength=0.3)
 
     # Center dot
     cpx, cpy = mapper.to_pixel(frame.position[0], frame.position[1])
-    cv2.circle(canvas, (cpx, cpy), 3, (255, 255, 255), -1, cv2.LINE_AA)
+    dot_col = (120, 120, 120) if is_stale else (255, 255, 255)
+    cv2.circle(canvas, (cpx, cpy), 3, dot_col, -1, cv2.LINE_AA)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -431,10 +445,12 @@ def draw_grid_side(canvas, side_mapper, scene_h, table_cal):
 
 
 def draw_lshape_side(canvas, side_mapper, frame, scene_h, table_cal):
-    """Draw the L-shape projected onto XZ plane in the side view."""
+    """Draw the L-shape projected onto XZ plane in the side view.
+    Stale frames drawn dimmed with hollow markers."""
     if frame is None or frame.marker_positions is None:
         return
 
+    is_stale = getattr(frame, "tracking_quality", "good") == "stale"
     ox = side_mapper.offset_x
     rw = side_mapper.region_w
 
@@ -450,26 +466,36 @@ def draw_lshape_side(canvas, side_mapper, frame, scene_h, table_cal):
     tri_pts = np.array(mpx, dtype=np.int32)
     overlay = canvas.copy()
     fill_col = tilt_color(frame.tilt_angle_deg)
+    if is_stale:
+        fill_col = tuple(c // 3 for c in fill_col)
     cv2.fillPoly(overlay, [tri_pts], fill_col)
-    cv2.addWeighted(overlay, 0.3, canvas, 0.7, 0, canvas)
+    cv2.addWeighted(overlay, 0.15 if is_stale else 0.3, canvas,
+                    0.85 if is_stale else 0.7, 0, canvas)
 
     # Triangle edges
-    cv2.line(canvas, mpx[0], mpx[1], COL_LINE, 1, cv2.LINE_AA)
-    cv2.line(canvas, mpx[0], mpx[2], COL_LINE, 1, cv2.LINE_AA)
-    cv2.line(canvas, mpx[1], mpx[2], (100, 100, 100), 1, cv2.LINE_AA)
+    edge_col = (80, 80, 80) if is_stale else COL_LINE
+    cv2.line(canvas, mpx[0], mpx[1], edge_col, 1, cv2.LINE_AA)
+    cv2.line(canvas, mpx[0], mpx[2], edge_col, 1, cv2.LINE_AA)
+    cv2.line(canvas, mpx[1], mpx[2], (60, 60, 60) if is_stale
+             else (100, 100, 100), 1, cv2.LINE_AA)
 
-    # Marker dots
+    # Marker dots — hollow if stale
     for i, (px, py) in enumerate(mpx):
-        cv2.circle(canvas, (px, py), 5, MARKER_COLORS[i], -1, cv2.LINE_AA)
-        cv2.circle(canvas, (px, py), 5, (255, 255, 255), 1, cv2.LINE_AA)
+        col = tuple(c // 2 for c in MARKER_COLORS[i]) if is_stale \
+            else MARKER_COLORS[i]
+        if is_stale:
+            cv2.circle(canvas, (px, py), 5, col, 1, cv2.LINE_AA)
+        else:
+            cv2.circle(canvas, (px, py), 5, col, -1, cv2.LINE_AA)
+            cv2.circle(canvas, (px, py), 5, (255, 255, 255), 1, cv2.LINE_AA)
 
-    # Surface normal arrow (in XZ plane)
-    if frame.surface_normal is not None:
+    # Surface normal arrow (in XZ plane) — only when good
+    if frame.surface_normal is not None and not is_stale:
         cpx, cpz = side_mapper.to_pixel(frame.position[0], frame.position[2])
         nx, nz = frame.surface_normal[0], frame.surface_normal[2]
         scale = 25
         ex = int(cpx + nx * scale)
-        ez = int(cpz - nz * scale)  # Z flipped (up in world = up in pixel)
+        ez = int(cpz - nz * scale)
         cv2.arrowedLine(canvas, (cpx, cpz), (ex, ez), COL_NORMAL, 2,
                         cv2.LINE_AA, tipLength=0.3)
 
@@ -549,6 +575,15 @@ def draw_info_bar(canvas, frame, table_cal, scene_h, w):
         cv2.putText(canvas, f"Tilt: {tilt:.1f}deg",
                     (430, y1), cv2.FONT_HERSHEY_SIMPLEX, 0.42, t_col, 1)
 
+        # Tracking quality badge
+        quality = getattr(frame, "tracking_quality", "good")
+        if quality == "good":
+            cv2.putText(canvas, "[GOOD]", (w - 80, y1),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 220, 0), 1)
+        else:
+            cv2.putText(canvas, "[STALE]", (w - 90, y1),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1)
+
         # Position
         p = frame.position
         cv2.putText(canvas,
@@ -583,11 +618,19 @@ def draw_timeline(canvas, frames, cursor_idx, playing, mode_label, w, h):
     cv2.rectangle(canvas, (bar_x0, bar_y), (bar_x1, bar_y + bar_h),
                   COL_BAR_BG, -1)
 
-    # Filled portion
-    if n > 1:
-        fill_w = int((bar_x1 - bar_x0) * cursor_idx / (n - 1))
-        cv2.rectangle(canvas, (bar_x0, bar_y),
-                      (bar_x0 + fill_w, bar_y + bar_h), COL_BAR_FG, -1)
+    # Filled portion — color-coded by tracking quality
+    if n > 1 and frames:
+        bar_w = bar_x1 - bar_x0
+        end = min(cursor_idx + 1, len(frames))
+        for i in range(end):
+            x0 = bar_x0 + int(bar_w * i / (n - 1))
+            x1 = bar_x0 + int(bar_w * min(i + 1, n - 1) / (n - 1))
+            if x1 <= x0:
+                x1 = x0 + 1
+            quality = getattr(frames[i], "tracking_quality", "good")
+            seg_col = (0, 200, 200) if quality == "stale" else COL_BAR_FG
+            cv2.rectangle(canvas, (x0, bar_y), (x1, bar_y + bar_h),
+                          seg_col, -1)
 
     # Cursor handle
     cx = bar_x0 + (int((bar_x1 - bar_x0) * cursor_idx / (n - 1)) if n > 1
@@ -605,8 +648,12 @@ def draw_timeline(canvas, frames, cursor_idx, playing, mode_label, w, h):
         cv2.putText(canvas, f"{t_end:.2f}s", (bar_x1 - 40, bar_y - 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, COL_HUD, 1)
 
-    # Frame counter
-    cv2.putText(canvas, f"Frame {cursor_idx}/{n - 1}",
+    # Frame counter with quality
+    quality_tag = ""
+    if frames and cursor_idx < len(frames):
+        q = getattr(frames[cursor_idx], "tracking_quality", "good")
+        quality_tag = f" [{q.upper()}]"
+    cv2.putText(canvas, f"Frame {cursor_idx}/{n - 1}{quality_tag}",
                 (bar_x0, bar_top + 45),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.35, (120, 120, 120), 1)
 
@@ -779,24 +826,37 @@ def calibrate_table(client, body_name, cs100, canvas, window_name):
                     (w // 2 - 180, h // 2 + 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 200, 100), 1)
 
-        # Show live body status
+        # Show live body status with tracking_valid info
         bodies = client.get_rigid_bodies()
         if bodies:
             matched = find_body(bodies, body_name)
             if matched:
                 body = bodies[matched]
                 p = body.position
+                tv = "TRACKED" if body.tracking_valid else "NOT TRACKED"
+                tv_col = (0, 255, 0) if body.tracking_valid else (0, 180, 255)
                 cv2.putText(canvas,
-                            f"'{matched}' detected at "
+                            f"'{matched}' [{tv}] at "
                             f"({p[0]:.3f}, {p[1]:.3f}, {p[2]:.3f})",
-                            (w // 2 - 200, h // 2 + 60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                            (0, 255, 0), 1)
+                            (w // 2 - 230, h // 2 + 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, tv_col, 1)
+                qn = np.linalg.norm(body.quaternion)
+                cv2.putText(canvas,
+                            f"quat_norm={qn:.3f}  "
+                            f"err={body.mean_marker_error:.4f}",
+                            (w // 2 - 120, h // 2 + 85),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+                            (140, 140, 140), 1)
             else:
                 cv2.putText(canvas, f"Body '{body_name}' not found!",
                             (w // 2 - 140, h // 2 + 60),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                             (0, 0, 255), 1)
+                cv2.putText(canvas,
+                            f"Available: {list(bodies.keys())[:3]}",
+                            (w // 2 - 140, h // 2 + 85),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+                            (140, 140, 140), 1)
         else:
             cv2.putText(canvas, "No bodies detected...",
                         (w // 2 - 100, h // 2 + 60),
@@ -813,11 +873,13 @@ def calibrate_table(client, body_name, cs100, canvas, window_name):
     # Record calibration samples
     estimator = FloorDepthEstimator(cs100)
     sample_count = 0
+    rejected_count = 0
+    last_reject_reason = ""
 
     print(f"[Calibration] Recording {num_samples} samples...")
     start = time.time()
 
-    while sample_count < num_samples and time.time() - start < 10.0:
+    while sample_count < num_samples and time.time() - start < 15.0:
         bodies = client.get_rigid_bodies()
         matched = find_body(bodies, body_name) if bodies else None
 
@@ -825,11 +887,31 @@ def calibrate_table(client, body_name, cs100, canvas, window_name):
             body = bodies[matched]
             pos = body.position
             quat = body.quaternion
-            if (np.all(np.isfinite(pos)) and np.all(np.isfinite(quat))
-                    and np.linalg.norm(pos) < 100.0
-                    and np.linalg.norm(quat) > 0.5):
+            pos_ok = np.all(np.isfinite(pos)) and np.linalg.norm(pos) < 100
+            quat_norm = np.linalg.norm(quat) if np.all(np.isfinite(quat)) \
+                else 0.0
+
+            # Accept data with relaxed quaternion threshold (0.1 vs 0.5)
+            # This handles Motive sending partial data with tracking_valid=False
+            if pos_ok and quat_norm > 0.1:
                 estimator.record_sample(pos, quat)
                 sample_count += 1
+            elif pos_ok and quat_norm <= 0.1:
+                # Motive sent zero quaternion — try last valid from client
+                last_valid = client.get_last_valid_bodies()
+                lv_match = find_body(last_valid, body_name)
+                if lv_match:
+                    lv = last_valid[lv_match]
+                    estimator.record_sample(pos, lv.quaternion)
+                    sample_count += 1
+                else:
+                    rejected_count += 1
+                    last_reject_reason = f"zero quat, no fallback"
+            else:
+                rejected_count += 1
+                last_reject_reason = (
+                    f"pos_ok={pos_ok} quat_norm={quat_norm:.3f} "
+                    f"tracking={body.tracking_valid}")
 
         # Show progress
         canvas[:] = 20
@@ -842,12 +924,31 @@ def calibrate_table(client, body_name, cs100, canvas, window_name):
         cv2.putText(canvas, f"Calibrating... {sample_count}/{num_samples}",
                     (w // 2 - 100, h // 2 - 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, COL_CAMERA, 1)
+        if rejected_count > 0:
+            cv2.putText(canvas, f"({rejected_count} rejected)",
+                        (w // 2 - 60, h // 2 + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 200), 1)
         cv2.imshow(window_name, canvas)
         cv2.waitKey(8)
 
     if sample_count < 10:
-        print(f"[Calibration] FAILED: only {sample_count} samples. "
-              f"Is the CS-100 visible?")
+        print(f"[Calibration] FAILED: only {sample_count} samples "
+              f"({rejected_count} rejected).")
+        # Diagnostic dump
+        bodies = client.get_rigid_bodies()
+        matched = find_body(bodies, body_name) if bodies else None
+        if matched:
+            b = bodies[matched]
+            print(f"  Body '{matched}': pos={b.position}, "
+                  f"quat={b.quaternion}, "
+                  f"tracking_valid={b.tracking_valid}, "
+                  f"quat_norm={np.linalg.norm(b.quaternion):.4f}")
+        else:
+            print(f"  Body '{body_name}' not in current frame. "
+                  f"Available: {list(bodies.keys()) if bodies else 'none'}")
+        if last_reject_reason:
+            print(f"  Last reject: {last_reject_reason}")
+        print("  [Tip] In Motive: Edit rigid body > set Min Markers = 2")
         return table_cal
 
     # Compute
@@ -902,17 +1003,22 @@ def find_body(bodies, body_name):
 
 def record_live(client, body_name, cs100, table_cal, duration,
                 canvas, top_mapper, side_mapper, window_name, dragger):
-    """Record frames from OptiTrack with live multi-view preview."""
+    """Record frames from OptiTrack with live multi-view preview.
+    Never freezes — uses last known good pose when tracking is lost."""
     frames = []
     start_time = time.time()
     paused = False
     h, w = canvas.shape[:2]
+    last_good = None  # Last frame with good tracking
+    stale_count = 0
+    good_count = 0
 
     print(f"[Tracker] Recording for {duration:.1f}s...")
 
     while True:
         now = time.time()
         elapsed = now - start_time
+        got_good = False
 
         # Get data
         bodies = client.get_rigid_bodies()
@@ -922,14 +1028,18 @@ def record_live(client, body_name, cs100, table_cal, duration,
             body = bodies[matched]
             pos = body.position
             quat = body.quaternion
+            pos_ok = np.all(np.isfinite(pos)) and np.linalg.norm(pos) < 100
+            quat_ok = (np.all(np.isfinite(quat))
+                       and np.linalg.norm(quat) > 0.1)
 
-            if (np.all(np.isfinite(pos)) and np.all(np.isfinite(quat))
-                    and np.linalg.norm(pos) < 100.0
-                    and np.linalg.norm(quat) > 0.5):
-
+            if pos_ok and quat_ok:
                 markers = cs100.compute_marker_positions(pos, quat)
-                frame = RecordedFrame(now, pos.copy(), quat.copy(), markers)
+                frame = RecordedFrame(now, pos.copy(), quat.copy(), markers,
+                                      tracking_quality="good")
                 compute_frame_3d(cs100, frame, table_cal)
+                last_good = frame
+                got_good = True
+                good_count += 1
 
                 if not paused:
                     frames.append(frame)
@@ -938,20 +1048,37 @@ def record_live(client, body_name, cs100, table_cal, duration,
                         side_mapper.fit_to_data(frames,
                                                 table_z=table_cal.table_z)
 
+        # Fallback: use last known good pose when tracking is lost
+        if not got_good and last_good is not None and not paused:
+            stale = RecordedFrame(
+                now, last_good.position, last_good.quaternion,
+                last_good.marker_positions,
+                surface_normal=last_good.surface_normal,
+                height_above_table=last_good.height_above_table,
+                tilt_angle_deg=last_good.tilt_angle_deg,
+                tracking_quality="stale",
+            )
+            frames.append(stale)
+            stale_count += 1
+
         # Render
         idx = len(frames) - 1 if frames else 0
         render_frame(canvas, top_mapper, side_mapper, frames, idx,
                      "recording", not paused, table_cal)
 
         # Recording progress overlay
+        stale_pct = (stale_count * 100 // max(len(frames), 1)
+                     if frames else 0)
         cv2.putText(canvas,
-                    f"{elapsed:.1f}s / {duration:.0f}s  ({len(frames)} frames)",
+                    f"{elapsed:.1f}s / {duration:.0f}s  ({len(frames)} frames"
+                    f"{f', {stale_pct}% stale' if stale_count > 0 else ''})",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COL_HUD, 1)
 
         cv2.imshow(window_name, canvas)
 
         if elapsed >= duration:
-            print(f"[Tracker] Recording complete: {len(frames)} frames")
+            print(f"[Tracker] Recording complete: {len(frames)} frames "
+                  f"({good_count} good, {stale_count} stale)")
             break
 
         key = cv2.waitKey(8) & 0xFF
@@ -1167,6 +1294,10 @@ def main():
   Phase 0: Table depth calibration
   Phase 1: Record motion ({args.duration:.0f}s)
   Phase 2: Multi-view playback with timeline
+
+  [Tip] In Motive: Edit > Settings > Streaming > Broadcast Frame Data = ON
+  [Tip] For best tracking: Edit rigid body > set Min Markers = 2
+  [Tip] Stale frames (yellow) = last good pose held during tracking loss
 ========================================================================
 """)
 
