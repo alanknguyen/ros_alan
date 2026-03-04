@@ -58,7 +58,6 @@ class RigidBodyState:
     quaternion: np.ndarray
     timestamp: float
     tracking_valid: bool
-    mean_marker_error: float = 0.0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -113,7 +112,6 @@ class OptiTrackClient:
 
         # Latest rigid body states
         self._rigid_bodies: Dict[str, RigidBodyState] = {}
-        self._last_valid_bodies: Dict[str, RigidBodyState] = {}
         self._lock = threading.Lock()
 
         # Counters
@@ -241,11 +239,6 @@ class OptiTrackClient:
         """Get the latest rigid body states (thread-safe copy)."""
         with self._lock:
             return dict(self._rigid_bodies)
-
-    def get_last_valid_bodies(self) -> Dict[str, RigidBodyState]:
-        """Get the last known valid state for each body (tracking_valid=True)."""
-        with self._lock:
-            return dict(self._last_valid_bodies)
 
     def get_frame_count(self) -> int:
         """Return the number of successfully parsed frames."""
@@ -559,9 +552,7 @@ class OptiTrackClient:
 
             # Mean marker error (float32)
             tracking_valid = True
-            mean_error = 0.0
             if offset + 4 <= len(data):
-                mean_error = struct.unpack_from("<f", data, offset)[0]
                 offset += 4
 
             # Params (int16) — bit 0 = tracking valid
@@ -587,17 +578,11 @@ class OptiTrackClient:
                 quaternion=quat,
                 timestamp=now,
                 tracking_valid=tracking_valid,
-                mean_marker_error=mean_error,
             )
 
         if new_bodies:
             with self._lock:
                 self._rigid_bodies = new_bodies
-                # Cache last valid state per body
-                for bname, bstate in new_bodies.items():
-                    if (bstate.tracking_valid and
-                            np.all(np.isfinite(bstate.position))):
-                        self._last_valid_bodies[bname] = bstate
             self._frame_count += 1
 
             if self._callback is not None:
