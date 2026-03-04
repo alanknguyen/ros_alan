@@ -202,6 +202,9 @@ class SceneRenderer:
         """
         Update the scene from a SceneSnapshot.
 
+        Auto-centers the camera on tracked objects so they are always visible,
+        regardless of where they are in OptiTrack/world coordinates.
+
         Parameters
         ----------
         snapshot : SceneSnapshot
@@ -209,6 +212,9 @@ class SceneRenderer:
         object_registry : dict
             Object definitions from scene_config.yaml "objects" section.
         """
+        # Collect valid positions for auto-centering
+        valid_positions = []
+
         # Update rigid bodies
         for name, body in snapshot.rigid_bodies.items():
             if not body.tracking_valid:
@@ -227,6 +233,11 @@ class SceneRenderer:
                 quaternion=body.quaternion,
                 shape_info=shape_info,
             )
+            valid_positions.append(body.position)
+
+        # Auto-center camera on tracked objects
+        if valid_positions:
+            self._camera.auto_center(valid_positions)
 
         # Update gripper if available
         if snapshot.gripper_position is not None:

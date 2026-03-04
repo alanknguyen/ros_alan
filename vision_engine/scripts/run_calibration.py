@@ -3,14 +3,14 @@
 scripts/run_calibration.py — OptiTrack ↔ World Frame Calibration Tool
 
 Computes the rigid transform from OptiTrack coordinates to your desired
-world frame (e.g., robot base frame) using the V120:Trio's triangular
-3-ball calibration frame.
+world frame (e.g., robot base frame) using a tracked rigid body such as
+the OptiTrack CS-100 Calibration Square.
 
 Two Calibration Modes
 ---------------------
 
 MODE 1: 3-Point Frame Definition (default, --mode frame)
-    Uses exactly 3 placements of the triangular calibration frame to
+    Uses exactly 3 placements of the CS-100 (or any tracked rigid body) to
     define the world coordinate system directly:
 
         Placement 1 = ORIGIN
@@ -54,7 +54,7 @@ Usage
     python scripts/run_calibration.py --mode svd
 
     # Specify which rigid body to track:
-    python scripts/run_calibration.py --body calibration_triangle
+    python scripts/run_calibration.py --body CS-100
 
 Output
 ------
@@ -70,13 +70,9 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import yaml
+from utils import load_config
 from cv.optitrack_client import OptiTrackClient
 from cv.transforms import compute_rigid_transform, apply_transform, make_transform
-
-
-def load_config(config_path: str) -> dict:
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
 
 
 def save_calibration(output_path: str, transform: np.ndarray, method: str, details: dict):
@@ -181,10 +177,10 @@ def calibrate_3point_frame(client, body_name: str, table_height: float) -> tuple
     """
     print("""
 ╔══════════════════════════════════════════════════════════════════════╗
-║           3-Point Frame Calibration (Triangular Tool)              ║
+║           3-Point Frame Calibration (CS-100 / Tracked Body)        ║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║                                                                     ║
-║  You will place the triangular calibration frame at 3 positions:    ║
+║  You will place the CS-100 (or tracked body) at 3 positions:       ║
 ║                                                                     ║
 ║    1. ORIGIN   — where you want (0, 0, 0) in your world frame      ║
 ║                  (e.g., robot base, table corner)                    ║
@@ -196,10 +192,10 @@ def calibrate_3point_frame(client, body_name: str, table_height: float) -> tuple
 ║                  (e.g., to the left of the robot base)               ║
 ║                  This determines which way +Y points.                ║
 ║                                                                     ║
-║  Z axis is computed automatically (right-hand rule: Z = X × Y).     ║
+║  Z axis is computed automatically (right-hand rule: Z = X x Y).     ║
 ║  All 3 points should be on the same horizontal surface (table).     ║
 ║                                                                     ║
-║  The calibration frame must be visible to V120:Trio at each step.   ║
+║  The body must be visible to V120:Trio at each step.                ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """)
 
@@ -418,7 +414,7 @@ def calibrate_svd(client, body_name: str, min_points: int) -> tuple:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Calibrate OptiTrack V120:Trio to world frame using triangular 3-ball tool"
+        description="Calibrate OptiTrack V120:Trio to world frame using CS-100 or tracked rigid body"
     )
     parser.add_argument(
         "--config",
@@ -466,13 +462,22 @@ def main():
     # Find calibration body
     body_name = args.body
     if body_name is None:
+        # Prefer the configured calibration tool name (e.g., "CS-100")
+        cal_cfg = config.get("calibration", {})
+        preferred_name = cal_cfg.get("tool_body", None)
+
         bodies = client.get_rigid_bodies()
         if not bodies:
             print("[Error] No rigid bodies detected. Is Motive streaming? "
-                  "Is the calibration frame visible?")
+                  "Is the calibration tool visible?")
             client.stop()
             return
-        body_name = list(bodies.keys())[0]
+
+        if preferred_name and preferred_name in bodies:
+            body_name = preferred_name
+        else:
+            body_name = list(bodies.keys())[0]
+
         print(f"[Calibration] Using rigid body: '{body_name}'")
         if len(bodies) > 1:
             print(f"  Other bodies: {', '.join(bodies.keys())}")

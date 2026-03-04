@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """
-scripts/run_renderer.py — OpenGL 3D Scene Renderer Test
+scripts/run_renderer.py — OpenGL 3D Scene Renderer
 
-Step 3 verification script. Connects to OptiTrack V120:Trio and renders
-tracked rigid bodies in a real-time 3D window.
+Connects to OptiTrack V120:Trio and renders tracked rigid bodies
+(including the CS-100 Calibration Square) in a real-time 3D window.
+
+The camera auto-centers on tracked objects so they are always visible,
+regardless of where they are in the OptiTrack coordinate space.
+
+If calibration.yaml exists, it is automatically loaded and applied
+to transform OptiTrack coordinates into the calibrated world frame.
 
 Controls
 --------
@@ -16,18 +22,10 @@ Controls
 Usage
 -----
     cd vision_engine
-    python scripts/run_renderer.py
-    python scripts/run_renderer.py --headless     # No window, FBO only
-    python scripts/run_renderer.py --no-optitrack  # Demo mode with fake data
-
-Verification Checklist
-----------------------
-    1. Window opens showing table grid, workspace bounds, coordinate axes
-    2. Rigid bodies appear as colored shapes at OptiTrack-reported positions
-    3. Moving objects physically updates their positions in real-time
-    4. Camera switching works (keys 1, 2, 3)
-    5. Free camera orbits with mouse drag, zooms with scroll
-    6. S key saves a screenshot
+    python scripts/run_renderer.py                  # Live OptiTrack
+    python scripts/run_renderer.py --no-optitrack   # Demo mode with fake data
+    python scripts/run_renderer.py --verbose         # Print object positions
+    python scripts/run_renderer.py --headless        # No window, FBO only
 """
 
 import sys
@@ -38,50 +36,47 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import yaml
+from utils import load_config, load_calibration
 from cv.optitrack_client import OptiTrackClient, RigidBodyState
 from cv.scene_state import SceneStateAggregator, SceneSnapshot
 from graphics.renderer import SceneRenderer
-
-
-def load_config(config_path: str) -> dict:
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
 
 
 def create_demo_snapshot() -> SceneSnapshot:
     """Create a fake snapshot for demo mode (no OptiTrack needed)."""
     t = time.time()
     bodies = {
-        "cube_1": RigidBodyState(
-            name="cube_1", id=1,
-            position=np.array([0.6 + 0.1 * np.sin(t), -0.1, 0.725]),
-            quaternion=np.array([0.0, 0.0, np.sin(t * 0.5) * 0.3, np.cos(t * 0.5)]),
+        "CS-100": RigidBodyState(
+            name="CS-100", id=1,
+            position=np.array([0.1 * np.sin(t), 0.1 * np.cos(t * 0.7), 0.005]),
+            quaternion=np.array([0.0, 0.0, np.sin(t * 0.3) * 0.1, 1.0]),
             timestamp=t, tracking_valid=True,
         ),
-        "cylinder_1": RigidBodyState(
-            name="cylinder_1", id=2,
-            position=np.array([0.75, 0.15 + 0.05 * np.cos(t * 0.7), 0.74]),
-            quaternion=np.array([0.0, 0.0, 0.0, 1.0]),
+        "cube_1": RigidBodyState(
+            name="cube_1", id=2,
+            position=np.array([0.3 + 0.05 * np.sin(t * 0.5), -0.1, 0.025]),
+            quaternion=np.array([0.0, 0.0, np.sin(t * 0.5) * 0.3, np.cos(t * 0.5)]),
             timestamp=t, tracking_valid=True,
         ),
     }
     return SceneSnapshot(
         timestamp=t,
         rigid_bodies=bodies,
-        gripper_position=np.array([0.6, 0.0, 0.85]),
+        gripper_position=np.array([0.2, 0.0, 0.15]),
         gripper_open=True,
     )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="OpenGL 3D scene renderer test")
+    parser = argparse.ArgumentParser(description="OpenGL 3D scene renderer")
     parser.add_argument(
         "--config",
         default=os.path.join(os.path.dirname(__file__), "..", "config", "scene_config.yaml"),
     )
     parser.add_argument("--headless", action="store_true", help="No window (FBO only)")
     parser.add_argument("--no-optitrack", action="store_true", help="Demo mode with fake data")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print object positions every 5 seconds")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -89,7 +84,16 @@ def main():
     objects_cfg = config.get("objects", {})
     renderer_cfg = config.get("renderer", {})
 
-    # Create renderer
+    # ── Load calibration if available ──
+    base_dir = os.path.join(os.path.dirname(__file__), "..")
+    calibration_transform = load_calibration(config, base_dir)
+    if calibration_transform is None:
+        print("[Renderer] No calibration loaded — using raw OptiTrack coordinates.")
+        print("  Run 'python scripts/run_calibration.py' to calibrate.")
+    else:
+        print("[Renderer] Calibration loaded — coordinates are in calibrated world frame.")
+
+    # ── Create renderer ──
     renderer = SceneRenderer(
         width=renderer_cfg.get("window_width", 1280),
         height=renderer_cfg.get("window_height", 720),
@@ -98,10 +102,10 @@ def main():
     )
     renderer.setup_scene(workspace_cfg)
 
-    # Create output directory
+    # ── Create output directory ──
     os.makedirs("output", exist_ok=True)
 
-    # Connect to OptiTrack (or use demo mode)
+    # ── Connect to OptiTrack (or use demo mode) ──
     client = None
     aggregator = None
 
@@ -115,12 +119,15 @@ def main():
             data_port=optitrack_cfg.get("data_port", 1511),
         )
         client.start()
-        aggregator = SceneStateAggregator(optitrack_client=client)
+        aggregator = SceneStateAggregator(
+            optitrack_client=client,
+            calibration_transform=calibration_transform,
+        )
         time.sleep(1.0)
 
     print("\n[Renderer] Controls: 1=birds-eye, 2=robot-view, 3=free-orbit, S=snapshot, Q=quit\n")
 
-    # Render loop
+    # ── Render loop ──
     frame_count = 0
     start_time = time.time()
 
@@ -138,12 +145,20 @@ def main():
 
             frame_count += 1
 
-            # Print FPS every 5 seconds
+            # Print status every 5 seconds
             elapsed = time.time() - start_time
             if elapsed >= 5.0:
                 fps = frame_count / elapsed
-                n_bodies = len(snapshot.rigid_bodies)
-                print(f"[Renderer] {fps:.0f} fps, {n_bodies} rigid bodies tracked")
+                n_bodies = sum(1 for b in snapshot.rigid_bodies.values() if b.tracking_valid)
+                body_names = [n for n, b in snapshot.rigid_bodies.items() if b.tracking_valid]
+                print(f"[Renderer] {fps:.0f} fps | {n_bodies} objects: {body_names}")
+
+                if args.verbose:
+                    for name, body in snapshot.rigid_bodies.items():
+                        if body.tracking_valid:
+                            p = body.position
+                            print(f"  {name}: pos=({p[0]:.3f}, {p[1]:.3f}, {p[2]:.3f})")
+
                 frame_count = 0
                 start_time = time.time()
 

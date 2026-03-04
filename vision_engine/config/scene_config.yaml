@@ -34,6 +34,17 @@ optitrack:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Calibration
+# ─────────────────────────────────────────────────────────────────────────────
+# file:       Path to calibration YAML (auto-loaded by scripts if it exists)
+# tool_body:  Rigid body name of the calibration tool in Motive.
+#             This body is excluded from physics predictions.
+calibration:
+  file: "config/calibration.yaml"
+  tool_body: "CS-100"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # RGB-D Camera Intrinsics
 # ─────────────────────────────────────────────────────────────────────────────
 # These are the pinhole camera parameters for the RGB-D sensor (e.g., RealSense).
@@ -95,6 +106,15 @@ workspace:
 # Add entries here for every rigid body you create in Motive.
 # Objects not listed here will render as small gray spheres with mass=0.1 kg.
 objects:
+  # OptiTrack CS-100 Calibration Square (165mm square, ~10mm thick plate)
+  # This is the primary tracking target during initial setup.
+  CS-100:
+    shape: "cube"
+    size: [0.165, 0.165, 0.01]
+    color: [0.8, 0.8, 0.0]       # Yellow
+    mass: 0.2
+    is_calibration_tool: true     # Excluded from physics predictions
+
   cube_1:
     shape: "cube"
     size: [0.05, 0.05, 0.05]
@@ -108,18 +128,12 @@ objects:
     color: [0.0, 0.0, 1.0]       # Blue
     mass: 0.05
 
-  # Example: uncomment and customize for your objects
+  # Add your own objects here. Names must match rigid body names in Motive.
   # sphere_1:
   #   shape: "sphere"
   #   radius: 0.03
   #   color: [0.0, 1.0, 0.0]     # Green
   #   mass: 0.08
-  #
-  # block_large:
-  #   shape: "cube"
-  #   size: [0.10, 0.10, 0.05]
-  #   color: [1.0, 0.5, 0.0]     # Orange
-  #   mass: 0.3
 
 
 # ─────────────────────────────────────────────────────────────────────────────

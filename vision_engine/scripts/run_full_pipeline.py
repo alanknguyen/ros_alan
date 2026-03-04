@@ -4,18 +4,22 @@ scripts/run_full_pipeline.py — Full Vision Engine Pipeline
 
 Launches all components together:
   - OptiTrack V120:Trio capture (NatNet client)
-  - Scene state aggregation (time-synchronized)
+  - Scene state aggregation (time-synchronized, with calibration)
   - OpenGL 3D rendering (real-time GLFW window)
   - PyBullet physics predictions (stability, grasp feasibility)
   - OpenCV 2D annotations (projected overlays)
   - Scene-to-language conversion (structured text for LLM)
+
+Calibration (calibration.yaml) is automatically loaded if it exists.
+Calibration tools (e.g., CS-100) are excluded from physics predictions
+but still rendered in the 3D view for reference.
 
 Controls
 --------
     1       Birds-eye camera
     2       Robot-view camera
     3       Free orbit camera (mouse drag/scroll)
-    S       Save snapshot (rendered 3D + annotated 2D + scene text → output/)
+    S       Save snapshot (rendered 3D + annotated 2D + scene text -> output/)
     P       Print scene description to console
     Q/Esc   Quit
 
@@ -27,9 +31,9 @@ Usage
 
 Output Files (on S key)
 -----------------------
-    output/snapshot_3d.png        — OpenGL rendered scene
-    output/snapshot_2d.png        — OpenCV annotated view
-    output/snapshot_scene.txt     — Scene description text for LLM
+    output/snapshot_NNNN_3d.png        — OpenGL rendered scene
+    output/snapshot_NNNN_2d.png        — OpenCV annotated view
+    output/snapshot_NNNN_scene.txt     — Scene description text for LLM
 """
 
 import sys
@@ -40,8 +44,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import yaml
 import cv2
+from utils import load_config, load_calibration, is_calibration_tool
 from cv.optitrack_client import OptiTrackClient, RigidBodyState
 from cv.scene_state import SceneStateAggregator, SceneSnapshot
 from cv.annotator import SceneAnnotator
@@ -52,41 +56,52 @@ from physics.predictions import PhysicsPredictor
 from physics.body_registry import BodyRegistry
 
 
-def load_config(config_path: str) -> dict:
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
-
 def create_demo_snapshot() -> SceneSnapshot:
     """Animated demo snapshot for testing without OptiTrack."""
     t = time.time()
     bodies = {
-        "cube_1": RigidBodyState(
-            name="cube_1", id=1,
+        "CS-100": RigidBodyState(
+            name="CS-100", id=1,
             position=np.array([
-                0.6 + 0.1 * np.sin(t * 0.5),
-                -0.1 + 0.05 * np.cos(t * 0.3),
-                0.725,
+                0.1 * np.sin(t * 0.3),
+                0.1 * np.cos(t * 0.3),
+                0.005,
             ]),
             quaternion=np.array([0.0, 0.0, np.sin(t * 0.2) * 0.1, 1.0]),
             timestamp=t, tracking_valid=True,
         ),
-        "cylinder_1": RigidBodyState(
-            name="cylinder_1", id=2,
+        "cube_1": RigidBodyState(
+            name="cube_1", id=2,
             position=np.array([
-                0.75 + 0.03 * np.sin(t * 0.7),
-                0.15,
-                0.74,
+                0.3 + 0.05 * np.sin(t * 0.5),
+                -0.1 + 0.05 * np.cos(t * 0.3),
+                0.025,
             ]),
-            quaternion=np.array([0.0, 0.0, 0.0, 1.0]),
+            quaternion=np.array([0.0, 0.0, np.sin(t * 0.2) * 0.1, 1.0]),
             timestamp=t, tracking_valid=True,
         ),
     }
     return SceneSnapshot(
         timestamp=t,
         rigid_bodies=bodies,
-        gripper_position=np.array([0.6, 0.0, 0.85]),
+        gripper_position=np.array([0.2, 0.0, 0.15]),
         gripper_open=True,
+    )
+
+
+def filter_calibration_tools(snapshot: SceneSnapshot, config: dict) -> SceneSnapshot:
+    """Return a new snapshot with calibration tool bodies removed (for physics)."""
+    filtered_bodies = {
+        name: body for name, body in snapshot.rigid_bodies.items()
+        if not is_calibration_tool(name, config)
+    }
+    return SceneSnapshot(
+        timestamp=snapshot.timestamp,
+        rigid_bodies=filtered_bodies,
+        gripper_position=snapshot.gripper_position,
+        gripper_open=snapshot.gripper_open,
+        rgb_image=snapshot.rgb_image,
+        depth_image=snapshot.depth_image,
     )
 
 
@@ -132,6 +147,14 @@ def main():
     renderer_cfg = config.get("renderer", {})
     physics_cfg = config.get("physics", {})
 
+    # ── Load calibration ──
+    base_dir = os.path.join(os.path.dirname(__file__), "..")
+    calibration_transform = load_calibration(config, base_dir)
+    if calibration_transform is None:
+        print("[Pipeline] No calibration loaded — using raw OptiTrack coordinates.")
+    else:
+        print("[Pipeline] Calibration loaded.")
+
     # ── Initialize Components ──
 
     # 1. OptiTrack client
@@ -147,7 +170,10 @@ def main():
             data_port=optitrack_cfg.get("data_port", 1511),
         )
         client.start()
-        aggregator = SceneStateAggregator(optitrack_client=client)
+        aggregator = SceneStateAggregator(
+            optitrack_client=client,
+            calibration_transform=calibration_transform,
+        )
         time.sleep(1.0)
 
     # 2. OpenGL renderer
@@ -233,11 +259,13 @@ def main():
                 snapshot = create_demo_snapshot()
 
             # ── 2. Physics predictions (every 1 second, not every frame) ──
+            #       Filter out calibration tools from physics
             if now - last_physics_time >= 1.0:
-                latest_predictions = predictor.predict_all(snapshot)
+                physics_snapshot = filter_calibration_tools(snapshot, config)
+                latest_predictions = predictor.predict_all(physics_snapshot)
                 last_physics_time = now
 
-            # ── 3. Render 3D scene ──
+            # ── 3. Render 3D scene (includes all objects, even calibration tools) ──
             renderer.update_scene(snapshot, objects_cfg)
             renderer.render()
 
@@ -267,7 +295,8 @@ def main():
                 elapsed = now - fps_start
                 fps = frame_count / elapsed if elapsed > 0 else 0
 
-                print(f"[Pipeline] {fps:.0f} fps | {n_bodies} objects | "
+                body_names = [n for n, b in snapshot.rigid_bodies.items() if b.tracking_valid]
+                print(f"[Pipeline] {fps:.0f} fps | {n_bodies} objects: {body_names} | "
                       f"physics: {len(latest_predictions)} predictions")
                 last_print_time = now
 

@@ -2,8 +2,12 @@
 """
 scripts/run_physics.py — PyBullet Physics Prediction Test
 
-Step 4 verification script. Connects to OptiTrack, mirrors the scene
-in PyBullet, and prints physics predictions.
+Connects to OptiTrack, mirrors the scene in PyBullet, and prints
+physics predictions. Calibration tools (e.g., CS-100) are automatically
+excluded from physics predictions.
+
+If calibration.yaml exists, it is loaded and applied to transform
+OptiTrack coordinates into the calibrated world frame.
 
 Usage
 -----
@@ -18,10 +22,6 @@ Expected Output
         stable=True, displacement=0.001m
         graspable=True (fits gripper), suggested_height=0.75m
         distance_to_gripper=0.23m
-      cylinder_1:
-        stable=True, displacement=0.003m
-        graspable=True (fits gripper), suggested_height=0.74m
-        distance_to_gripper=0.15m
 """
 
 import sys
@@ -32,17 +32,12 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import yaml
+from utils import load_config, load_calibration, is_calibration_tool
 from cv.optitrack_client import OptiTrackClient, RigidBodyState
 from cv.scene_state import SceneStateAggregator, SceneSnapshot
 from physics.world import PhysicsWorld
 from physics.predictions import PhysicsPredictor
 from physics.body_registry import BodyRegistry
-
-
-def load_config(config_path: str) -> dict:
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
 
 
 def create_demo_snapshot() -> SceneSnapshot:
@@ -69,6 +64,22 @@ def create_demo_snapshot() -> SceneSnapshot:
     )
 
 
+def filter_calibration_tools(snapshot: SceneSnapshot, config: dict) -> SceneSnapshot:
+    """Return a new snapshot with calibration tool bodies removed."""
+    filtered_bodies = {
+        name: body for name, body in snapshot.rigid_bodies.items()
+        if not is_calibration_tool(name, config)
+    }
+    return SceneSnapshot(
+        timestamp=snapshot.timestamp,
+        rigid_bodies=filtered_bodies,
+        gripper_position=snapshot.gripper_position,
+        gripper_open=snapshot.gripper_open,
+        rgb_image=snapshot.rgb_image,
+        depth_image=snapshot.depth_image,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Physics prediction test")
     parser.add_argument(
@@ -83,6 +94,10 @@ def main():
     physics_cfg = config.get("physics", {})
     objects_cfg = config.get("objects", {})
     workspace_cfg = config.get("workspace", {})
+
+    # Load calibration
+    base_dir = os.path.join(os.path.dirname(__file__), "..")
+    calibration_transform = load_calibration(config, base_dir)
 
     # Create physics engine
     registry = BodyRegistry(objects_cfg)
@@ -110,7 +125,10 @@ def main():
             data_port=optitrack_cfg.get("data_port", 1511),
         )
         client.start()
-        aggregator = SceneStateAggregator(optitrack_client=client)
+        aggregator = SceneStateAggregator(
+            optitrack_client=client,
+            calibration_transform=calibration_transform,
+        )
         time.sleep(1.0)
 
     print(f"\n[Physics] Running predictions every 2 seconds for {args.duration}s...")
@@ -121,9 +139,14 @@ def main():
     try:
         while time.time() - start < args.duration:
             snapshot = aggregator.capture_snapshot() if aggregator else create_demo_snapshot()
-            predictions = predictor.predict_all(snapshot)
+
+            # Filter out calibration tools before physics
+            physics_snapshot = filter_calibration_tools(snapshot, config)
+            predictions = predictor.predict_all(physics_snapshot)
 
             print(f"--- Predictions at t={snapshot.timestamp:.2f} ---")
+            if not predictions:
+                print("  (no non-calibration objects tracked)")
             for name, pred in sorted(predictions.items()):
                 stable_str = "stable" if pred["stable"] else f"UNSTABLE ({pred['displacement']*100:.1f}cm)"
                 grasp_str = f"graspable ({pred['grasp_reason']})" if pred["graspable"] else f"NOT graspable ({pred['grasp_reason']})"

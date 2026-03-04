@@ -4,16 +4,19 @@ vision_engine/graphics/camera_controller.py — 3D Camera Viewpoint Control
 Manages camera position and orientation for the OpenGL renderer.
 Supports three modes:
 
-  1. Birds-Eye:     Top-down view of the workspace
+  1. Birds-Eye:     Top-down view of the workspace (or tracked objects)
   2. Robot View:    From behind the robot, looking forward at the table
   3. Free Orbit:    Mouse-controlled orbit camera (drag to rotate, scroll to zoom)
 
-All cameras produce a 4×4 view matrix for OpenGL via pyrr.matrix44.create_look_at.
+The camera auto-centers on tracked objects when they are detected,
+so it works correctly regardless of where objects are in OptiTrack space.
+
+All cameras produce a 4x4 view matrix for OpenGL via pyrr.matrix44.create_look_at.
 """
 
 import numpy as np
 import pyrr
-from typing import Optional
+from typing import Optional, List
 
 
 class CameraController:
@@ -26,6 +29,7 @@ class CameraController:
         Initial camera mode: "birds_eye", "robot_view", or "free".
     workspace_center : tuple of 3 floats
         Center of the workspace (x, y, z) — the default look-at target.
+        Updated automatically when auto_center() is called.
     """
 
     def __init__(
@@ -34,6 +38,7 @@ class CameraController:
         workspace_center: tuple = (0.7, 0.0, 0.7),
     ):
         self.workspace_center = np.array(workspace_center, dtype=np.float32)
+        self._has_auto_centered = False
 
         # Free camera orbit state
         self._orbit_yaw = -90.0       # degrees, horizontal angle
@@ -59,9 +64,37 @@ class CameraController:
         """
         self.mode = mode
 
+    def auto_center(self, positions: List[np.ndarray]) -> None:
+        """
+        Auto-center the camera on the centroid of tracked object positions.
+
+        Called when live objects are detected, so the camera looks at
+        where objects actually are (not the hardcoded workspace center).
+
+        Parameters
+        ----------
+        positions : list of np.ndarray, each shape (3,)
+            World-space positions of all tracked objects.
+        """
+        if not positions:
+            return
+
+        centroid = np.mean(positions, axis=0).astype(np.float32)
+        self.workspace_center = centroid
+        self._orbit_target = centroid.copy()
+
+        if not self._has_auto_centered:
+            self._has_auto_centered = True
+            # Set orbit distance based on spread of objects
+            if len(positions) > 1:
+                spread = max(np.linalg.norm(p - centroid) for p in positions)
+                self._orbit_distance = max(spread * 3.0, 0.8)
+            else:
+                self._orbit_distance = 1.0
+
     def get_view_matrix(self) -> np.ndarray:
         """
-        Compute the 4×4 view matrix for the current camera mode.
+        Compute the 4x4 view matrix for the current camera mode.
 
         Returns
         -------
@@ -84,27 +117,31 @@ class CameraController:
         pos : np.ndarray, shape (3,)
         """
         if self.mode == "birds_eye":
-            return np.array([0.7, 0.0, 2.0], dtype=np.float32)
+            c = self.workspace_center
+            return np.array([c[0], c[1], c[2] + 1.3], dtype=np.float32)
         elif self.mode == "robot_view":
-            return np.array([-0.2, 0.0, 1.2], dtype=np.float32)
+            c = self.workspace_center
+            return np.array([c[0] - 0.9, c[1], c[2] + 0.5], dtype=np.float32)
         else:
             return self._orbit_camera_position()
 
     # ──────────────────────────────────────────────────────────────────────
-    # Preset Views
+    # Preset Views (relative to workspace_center)
     # ──────────────────────────────────────────────────────────────────────
 
     def _birds_eye_view(self) -> np.ndarray:
-        """Top-down view looking straight down at the workspace."""
-        eye = np.array([0.7, 0.0, 2.0], dtype=np.float32)
-        target = self.workspace_center
+        """Top-down view looking straight down at the workspace center."""
+        c = self.workspace_center
+        eye = np.array([c[0], c[1], c[2] + 1.3], dtype=np.float32)
+        target = c
         up = np.array([1.0, 0.0, 0.0], dtype=np.float32)  # X is "up" in top-down
         return np.array(pyrr.matrix44.create_look_at(eye, target, up), dtype=np.float32)
 
     def _robot_view(self) -> np.ndarray:
-        """View from behind the robot, looking forward towards the table."""
-        eye = np.array([-0.2, 0.0, 1.2], dtype=np.float32)
-        target = self.workspace_center
+        """View from behind the robot, looking forward towards the workspace center."""
+        c = self.workspace_center
+        eye = np.array([c[0] - 0.9, c[1], c[2] + 0.5], dtype=np.float32)
+        target = c
         up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
         return np.array(pyrr.matrix44.create_look_at(eye, target, up), dtype=np.float32)
 
