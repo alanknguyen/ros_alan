@@ -1,0 +1,158 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Vision Engine — Scene Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# This file configures all components of the vision engine:
+#   - OptiTrack V120:Trio connection parameters
+#   - RGB-D camera intrinsics (for point cloud / 2D overlay)
+#   - Robot workspace bounds
+#   - Object registry (maps rigid body names → shapes, colors, masses)
+#   - Renderer settings
+#   - Physics engine settings
+#
+# Object names in the 'objects' section MUST exactly match the rigid body names
+# defined in Motive. The engine uses these names for rendering and physics.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OptiTrack V120:Trio Connection
+# ─────────────────────────────────────────────────────────────────────────────
+# server_ip:     IP address of the Windows PC running Motive
+# multicast_ip:  NatNet multicast group (default 239.255.42.99)
+# command_port:  NatNet command port (default 1510, unicast)
+# data_port:     NatNet data port (default 1511, multicast)
+# up_axis:       Motive's up-axis setting — "y" (default) or "z"
+#                The engine converts to Z-up internally regardless.
+optitrack:
+  server_ip: "192.168.0.101"
+  local_ip: "192.168.0.100"       # Linux machine's IP on the same subnet as Motive
+  multicast_ip: "239.255.42.99"
+  command_port: 1510
+  data_port: 1511
+  up_axis: "y"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RGB-D Camera Intrinsics
+# ─────────────────────────────────────────────────────────────────────────────
+# These are the pinhole camera parameters for the RGB-D sensor (e.g., RealSense).
+# Used for:
+#   - Projecting 3D rigid body positions onto the camera image (2D overlays)
+#   - Unprojecting pixels + depth → 3D points (point cloud generation)
+#
+# fx, fy:  Focal lengths in pixels
+# cx, cy:  Principal point (optical center) in pixels
+# width, height: Image resolution
+#
+# These values should come from the camera's calibration / camera_info topic.
+# The values below are for an example RealSense D435 at 640×480.
+camera:
+  fx: 615.3
+  fy: 615.1
+  cx: 320.5
+  cy: 240.2
+  width: 640
+  height: 480
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Robot Workspace Bounds
+# ─────────────────────────────────────────────────────────────────────────────
+# All values in meters, in the robot base frame (Z-up convention).
+#
+# x_min/x_max:    Forward/backward reach limits
+# y_min/y_max:    Left/right reach limits
+# z_min:          Lowest safe height (above table collision)
+# table_height:   Height of the table surface (used for physics ground plane)
+#
+# These bounds are used for:
+#   - Rendering the workspace box in the 3D view
+#   - Physics ground plane placement
+#   - Scene description context for the LLM
+workspace:
+  x_min: 0.4
+  x_max: 1.0
+  y_min: -0.6
+  y_max: 0.6
+  z_min: 0.0
+  table_height: 0.7
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Object Registry
+# ─────────────────────────────────────────────────────────────────────────────
+# Maps rigid body names (as defined in Motive) to their physical properties.
+#
+# For each object:
+#   shape:   "cube" | "cylinder" | "sphere"
+#   size:    [width, depth, height] in meters (for cubes)
+#   radius:  meters (for cylinders and spheres)
+#   height:  meters (for cylinders)
+#   color:   [R, G, B] floats in [0, 1] — used for 3D rendering and 2D labels
+#   mass:    kilograms — used for physics simulation
+#
+# Add entries here for every rigid body you create in Motive.
+# Objects not listed here will render as small gray spheres with mass=0.1 kg.
+objects:
+  cube_1:
+    shape: "cube"
+    size: [0.05, 0.05, 0.05]
+    color: [1.0, 0.0, 0.0]       # Red
+    mass: 0.1
+
+  cylinder_1:
+    shape: "cylinder"
+    radius: 0.025
+    height: 0.08
+    color: [0.0, 0.0, 1.0]       # Blue
+    mass: 0.05
+
+  # Example: uncomment and customize for your objects
+  # sphere_1:
+  #   shape: "sphere"
+  #   radius: 0.03
+  #   color: [0.0, 1.0, 0.0]     # Green
+  #   mass: 0.08
+  #
+  # block_large:
+  #   shape: "cube"
+  #   size: [0.10, 0.10, 0.05]
+  #   color: [1.0, 0.5, 0.0]     # Orange
+  #   mass: 0.3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Renderer Settings
+# ─────────────────────────────────────────────────────────────────────────────
+# headless:           If true, no GLFW window — FBO-only rendering
+# window_width/height: Size of the human-facing OpenGL window
+# fbo_width/height:    Size of offscreen renders (for VLM snapshots)
+# camera_mode:         Default camera: "birds_eye" | "robot_view" | "free"
+# show_point_cloud:    Render RGB-D point cloud in 3D view
+# show_workspace_bounds: Draw wireframe workspace box
+# background_color:    RGB float [0-1] for the scene background
+renderer:
+  headless: false
+  window_width: 1280
+  window_height: 720
+  fbo_width: 640
+  fbo_height: 480
+  camera_mode: "birds_eye"
+  show_point_cloud: false
+  show_workspace_bounds: true
+  background_color: [0.15, 0.15, 0.15]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Physics Engine Settings
+# ─────────────────────────────────────────────────────────────────────────────
+# prediction_horizon:  How far into the future to simulate (seconds)
+# gravity:             Gravitational acceleration (m/s², negative = downward)
+# step_rate:           Physics simulation frequency (Hz). 240 is PyBullet default.
+# gripper_width:       Maximum gripper opening (meters). Sawyer electric = ~0.08m.
+physics:
+  prediction_horizon: 2.0
+  gravity: -9.81
+  step_rate: 240
+  gripper_width: 0.08

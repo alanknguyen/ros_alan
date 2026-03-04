@@ -1,0 +1,258 @@
+# Vision Engine — Setup & Configuration Guide
+
+## Overview
+
+The Vision Engine is a standalone Python package that captures rigid body tracking data
+from an **OptiTrack V120:Trio** motion capture system, renders interactive 3D scene
+visualizations, runs physics-based predictions, and produces structured scene descriptions
+for VLM/VLA/LLM robotic control pipelines.
+
+It has **zero ROS dependencies** for core functionality. A thin ROS bridge
+(`scripts/run_ros_bridge.py`) is provided for integration with the Sawyer robot stack.
+
+---
+
+## Hardware Requirements
+
+### OptiTrack V120:Trio
+- Self-contained 3-camera bar with built-in processing
+- Connected to a **Windows PC** running **Motive** (v2.x or v3.x)
+- Network: Ethernet connection between Motive PC and your workstation
+- Markers: Reflective marker rigid body assets created in Motive
+
+### Network Configuration
+```
+┌─────────────────────┐     Ethernet      ┌─────────────────────┐
+│  Motive PC (Win)    │◄────────────────►  │  Workstation (Linux) │
+│  192.168.0.110      │                    │  192.168.0.105       │
+│  NatNet Server      │                    │  Vision Engine       │
+│  V120:Trio USB      │                    │                      │
+└─────────────────────┘                    └─────────────────────┘
+```
+
+Both machines must be on the **same subnet** (e.g., 192.168.0.x/24).
+
+### RGB-D Camera (Optional)
+- Intel RealSense D435/D455, or similar
+- Provides RGB + depth images for point cloud rendering and 2D annotations
+- Not required for core OptiTrack capture + 3D rendering
+
+---
+
+## Software Installation
+
+### 1. Python Dependencies
+```bash
+cd /path/to/ros_alan/vision_engine
+pip install -r requirements.txt
+```
+
+This installs:
+- `numpy` — array math
+- `opencv-python` — image processing
+- `moderngl` — OpenGL 3.3+ rendering
+- `glfw` — window management
+- `pyrr` — 3D math (matrices, quaternions)
+- `pybullet` — physics simulation
+- `pyyaml` — config parsing
+
+### 2. OpenGL Drivers
+Ensure your system has OpenGL 3.3+ support:
+```bash
+glxinfo | grep "OpenGL version"
+# Should show 3.3 or higher
+```
+
+On Ubuntu/Debian, install mesa drivers if needed:
+```bash
+sudo apt install libgl1-mesa-glx libgl1-mesa-dri
+```
+
+### 3. GLFW System Library
+```bash
+# Ubuntu/Debian
+sudo apt install libglfw3 libglfw3-dev
+
+# macOS (via Homebrew)
+brew install glfw
+```
+
+---
+
+## Motive Configuration (Windows PC)
+
+### 1. Create Rigid Bodies
+1. Open Motive, ensure V120:Trio cameras are detected
+2. Place reflective markers on each object you want to track
+3. Select markers → Right-click → "Create Rigid Body"
+4. Name each rigid body to match `config/scene_config.yaml` entries
+   (e.g., `cube_1`, `cylinder_1`)
+
+### 2. Enable NatNet Streaming
+1. Go to **Edit → Settings → Streaming**
+2. Enable **NatNet** streaming
+3. Set:
+   - **Local Interface**: Your Motive PC's IP (e.g., `192.168.0.110`)
+   - **Transmission Type**: Multicast
+   - **Multicast Address**: `239.255.42.99` (default)
+   - **Command Port**: `1510` (default)
+   - **Data Port**: `1511` (default)
+   - **Up Axis**: Y-Up (default — the engine converts to Z-up internally)
+
+### 3. Verify Streaming
+- In Motive, check the streaming status bar shows "Streaming"
+- Rigid bodies should show green tracking indicators
+
+---
+
+## Vision Engine Configuration
+
+### config/scene_config.yaml
+
+```yaml
+optitrack:
+  server_ip: "192.168.0.110"      # IP of the Motive PC
+  multicast_ip: "239.255.42.99"   # NatNet multicast group (default)
+  command_port: 1510              # NatNet command port (default)
+  data_port: 1511                 # NatNet data port (default)
+  up_axis: "y"                    # Motive's up-axis setting
+
+camera:                           # RGB-D camera intrinsics (if using camera)
+  fx: 615.3
+  fy: 615.1
+  cx: 320.5
+  cy: 240.2
+  width: 640
+  height: 480
+
+workspace:                        # Robot workspace bounds (meters, in robot base frame)
+  x_min: 0.4
+  x_max: 1.0
+  y_min: -0.6
+  y_max: 0.6
+  z_min: 0.0
+  table_height: 0.7
+
+objects:                          # Registry of tracked objects
+  cube_1:                         # Must match rigid body name in Motive
+    shape: "cube"
+    size: [0.05, 0.05, 0.05]     # meters [width, depth, height]
+    color: [1.0, 0.0, 0.0]       # RGB float [0-1] for rendering
+    mass: 0.1                     # kg, for physics simulation
+  cylinder_1:
+    shape: "cylinder"
+    radius: 0.025                 # meters
+    height: 0.08                  # meters
+    color: [0.0, 0.0, 1.0]
+    mass: 0.05
+```
+
+**Important**: Object names in the `objects:` section must exactly match the rigid body
+names defined in Motive. The engine uses these names to look up shape/color/mass info
+for rendering and physics.
+
+### config/calibration.yaml
+
+Generated by `scripts/run_calibration.py`. Contains the 4×4 homogeneous transform
+from OptiTrack world frame to robot base frame:
+
+```yaml
+# Auto-generated by run_calibration.py
+# Maps OptiTrack world coordinates → robot base frame coordinates
+transform:
+  - [0.999, -0.012,  0.003, -0.150]
+  - [0.012,  0.999, -0.005,  0.042]
+  - [-0.003, 0.005,  1.000,  0.001]
+  - [0.000,  0.000,  0.000,  1.000]
+rms_error: 0.0032  # meters
+num_points: 8
+```
+
+---
+
+## Running the Vision Engine
+
+### Step 1: Test OptiTrack Connection
+```bash
+cd /path/to/ros_alan/vision_engine
+python scripts/run_capture.py
+```
+Expected output:
+```
+[OptiTrack] Connecting to 192.168.0.110...
+[OptiTrack] Server: Motive v3.0.0, NatNet v4.0.0
+[OptiTrack] Receiving rigid bodies...
+
+[t=1712345678.42] cube_1:     pos=( 0.412, -0.185,  0.732) quat=(0.02, 0.71, -0.01, 0.70) valid=True
+[t=1712345678.42] cylinder_1: pos=( 0.550,  0.100,  0.710) quat=(0.00, 0.00,  0.00, 1.00) valid=True
+```
+
+### Step 2: Run Calibration (once per setup)
+```bash
+python scripts/run_calibration.py
+```
+Follow the interactive prompts to record correspondence points.
+
+### Step 3: 3D Visualization
+```bash
+python scripts/run_renderer.py
+```
+Controls: `1`=bird's eye, `2`=robot view, `3`=free orbit, `Q`=quit
+
+### Step 4: Physics Predictions
+```bash
+python scripts/run_physics.py
+```
+
+### Step 5: Full Pipeline
+```bash
+python scripts/run_full_pipeline.py
+```
+
+---
+
+## Coordinate Frame Conventions
+
+### OptiTrack (Motive Default)
+- **Y-up** right-handed coordinate system
+- X = right, Y = up, Z = towards cameras
+- Quaternion format: (qx, qy, qz, qw) — Hamilton convention
+
+### Vision Engine Internal (Z-up)
+- **Z-up** right-handed coordinate system (robotics convention)
+- X = forward, Y = left, Z = up
+- Conversion from Y-up: `x_zup = x_yup, y_zup = -z_yup, z_zup = y_yup`
+- Quaternion is also rotated to match the new frame
+
+### Robot Base Frame
+- Origin at robot shoulder
+- X = forward (towards table), Y = left, Z = up
+- Table surface at z ≈ 0.7m
+- Workspace: X∈[0.4, 1.0], Y∈[-0.6, 0.6]
+
+### Camera Frame
+- X = right, Y = down, Z = forward (optical convention)
+- Defined by extrinsic calibration relative to world/robot frame
+
+---
+
+## Troubleshooting
+
+### "No rigid bodies received"
+1. Check Motive is running and streaming is enabled
+2. Verify network connectivity: `ping 192.168.0.110`
+3. Check firewall: NatNet uses UDP ports 1510 (command) and 1511 (data)
+4. Ensure multicast is enabled on your network interface:
+   ```bash
+   ip route add 239.255.42.99/32 dev eth0  # or your interface name
+   ```
+
+### "OpenGL context creation failed"
+1. Check OpenGL version: `glxinfo | grep "OpenGL version"`
+2. Install/update GPU drivers
+3. For headless servers, use `headless=True` in config (EGL context)
+
+### "Physics predictions seem wrong"
+1. Verify object shapes/masses in `scene_config.yaml` match physical objects
+2. Check calibration accuracy: `rms_error` should be <5mm
+3. Ensure table_height matches actual table surface height

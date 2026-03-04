@@ -1,0 +1,10 @@
+# Vision Engine Dependencies
+# Install: pip install -r requirements.txt
+
+numpy>=1.21              # Array math, linear algebra
+opencv-python>=4.5       # Image processing, 2D annotations
+moderngl>=5.8            # OpenGL 3.3+ rendering (context, FBO, shaders)
+glfw>=2.5                # OpenGL window creation + input handling
+pyrr>=0.10               # 3D math: matrices, quaternions, vectors
+pybullet>=3.2            # Physics simulation (headless DIRECT mode)
+pyyaml>=6.0              # YAML config file parsing
