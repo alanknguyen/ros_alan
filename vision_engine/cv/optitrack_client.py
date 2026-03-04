@@ -507,21 +507,20 @@ class OptiTrackClient:
 
         This is the main data path — called at frame rate (~120 Hz).
 
-        Layout (simplified, NatNet 3.0+):
+        Handles both NatNet 2.x and 3.0+ formats:
+          - NatNet 2.x: rigid bodies include per-body marker data
+          - NatNet 3.0+: rigid bodies have only pose + meanError + params
+
+        Layout:
           - int32 frame_number
           - int32 num_marker_sets → [skip marker set data]
           - int32 num_other_markers → [skip]
           - int32 num_rigid_bodies → [parse each rigid body]
           - ... (skeletons, labeled markers, etc.)
-
-        Rigid body per-frame data:
-          - int32 id
-          - float32 x, y, z
-          - float32 qx, qy, qz, qw
-          - int16 params (bit 0 = tracking valid) [NatNet 3.0+]
         """
         try:
             now = time.time()
+            natnet_major = self.natnet_version[0] if self.natnet_version[0] > 0 else 3
 
             # Frame number
             frame_number = struct.unpack_from("<i", data, offset)[0]
@@ -566,17 +565,27 @@ class OptiTrackClient:
                 qx, qy, qz, qw = struct.unpack_from("<ffff", data, offset)
                 offset += 16
 
-                # Tracking params (NatNet 3.0+)
+                # ── NatNet 2.x: per-body marker data (removed in 3.0) ──
+                if natnet_major < 3:
+                    n_body_markers = struct.unpack_from("<i", data, offset)[0]
+                    offset += 4
+                    # Marker positions: float32[nMarkers * 3]
+                    offset += n_body_markers * 12
+                    # Marker IDs: int32[nMarkers] (NatNet >= 2.0)
+                    offset += n_body_markers * 4
+                    # Marker sizes: float32[nMarkers] (NatNet >= 2.0)
+                    offset += n_body_markers * 4
+
+                # ── Mean marker error (float32) — NatNet >= 2.0 ──
                 tracking_valid = True
+                if offset + 4 <= len(data):
+                    offset += 4  # Skip mean marker error
+
+                # ── Params (int16) — bit 0 = tracking valid ──
                 if offset + 2 <= len(data):
-                    # Try to read params — bit 0 indicates tracking validity
                     params = struct.unpack_from("<H", data, offset)[0]
                     offset += 2
                     tracking_valid = bool(params & 0x0001)
-
-                    # NatNet 3.0+ also has mean marker error (float32)
-                    if offset + 4 <= len(data):
-                        offset += 4  # Skip mean error
 
                 # Convert coordinates
                 pos = np.array([px, py, pz], dtype=np.float64)

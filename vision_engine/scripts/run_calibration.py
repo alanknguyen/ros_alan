@@ -31,6 +31,9 @@ Usage
     # SVD multi-point:
     python scripts/run_calibration.py --mode svd
 
+    # Debug — print all raw data from OptiTrack:
+    python scripts/run_calibration.py --mode debug
+
 Output
 ------
     config/calibration.yaml — calibration data (depth, transform, etc.)
@@ -62,6 +65,69 @@ def save_calibration(output_path: str, data: dict):
     print(f"\n[Calibration] Saved to {output_path}")
 
 
+def wait_for_body(client, preferred_name: str, timeout: float = 10.0) -> str:
+    """
+    Wait until at least one rigid body appears, then return the best match.
+
+    Prints diagnostic info about what bodies are available.
+    """
+    print(f"[Calibration] Waiting for rigid bodies (timeout {timeout:.0f}s)...")
+
+    start = time.time()
+    bodies = {}
+    while time.time() - start < timeout:
+        bodies = client.get_rigid_bodies()
+        if bodies:
+            break
+        time.sleep(0.1)
+
+    if not bodies:
+        print("\n[ERROR] No rigid bodies received from OptiTrack.")
+        print("  Checklist:")
+        print("    1. Is Motive running and streaming? (View → Data Streaming → check ON)")
+        print("    2. Is a rigid body defined in Motive? (Select markers → right-click → Rigid Body)")
+        print("    3. Is the network correct? (server_ip in scene_config.yaml)")
+        print(f"    4. NatNet version: {client.natnet_version}")
+        print(f"    5. Server: {client.server_app_name or 'no response'}")
+        print(f"    6. Frames received: {client.get_frame_count()}")
+        print(f"    7. Rigid body IDs known: {dict(client._id_to_name)}")
+        return None
+
+    # Print all available bodies
+    print(f"\n[Calibration] Detected {len(bodies)} rigid body(ies):")
+    for name, body in bodies.items():
+        p = body.position
+        q = body.quaternion
+        status = "TRACKING" if body.tracking_valid else "NOT TRACKING"
+        print(f"  '{name}' (id={body.id}) — {status}")
+        print(f"    pos=({p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f})")
+        print(f"    quat=({q[0]:.4f}, {q[1]:.4f}, {q[2]:.4f}, {q[3]:.4f})")
+
+    # Try to match the preferred name
+    if preferred_name in bodies:
+        print(f"\n[Calibration] Using rigid body: '{preferred_name}'")
+        return preferred_name
+
+    # Case-insensitive match
+    for name in bodies:
+        if name.lower() == preferred_name.lower():
+            print(f"\n[Calibration] Using rigid body: '{name}' (matched '{preferred_name}' case-insensitive)")
+            return name
+
+    # Partial match (e.g., "CS-100" matches "CS-100 1" or "cs100")
+    for name in bodies:
+        if preferred_name.lower().replace("-", "").replace("_", "") in name.lower().replace("-", "").replace("_", ""):
+            print(f"\n[Calibration] Using rigid body: '{name}' (partial match for '{preferred_name}')")
+            return name
+
+    # Fall back to first available body
+    fallback = list(bodies.keys())[0]
+    print(f"\n[WARNING] Preferred body '{preferred_name}' not found.")
+    print(f"  Available: {list(bodies.keys())}")
+    print(f"  Falling back to: '{fallback}'")
+    return fallback
+
+
 def record_position(client, body_name: str, label: str, num_samples: int = 60) -> np.ndarray:
     """Record the averaged position of a rigid body."""
     input(f"\n  Place the CS-100 at: {label}\n"
@@ -69,10 +135,16 @@ def record_position(client, body_name: str, label: str, num_samples: int = 60) -
 
     readings = []
     print(f"  Recording ({num_samples} frames)...", end="", flush=True)
-    for _ in range(num_samples):
+    for i in range(num_samples * 2):
         bodies = client.get_rigid_bodies()
-        if body_name in bodies and bodies[body_name].tracking_valid:
-            readings.append(bodies[body_name].position.copy())
+        if body_name in bodies:
+            body = bodies[body_name]
+            pos = body.position
+            # Accept if position is finite (don't rely solely on tracking_valid)
+            if np.all(np.isfinite(pos)) and np.linalg.norm(pos) < 100.0:
+                readings.append(pos.copy())
+                if len(readings) >= num_samples:
+                    break
         time.sleep(0.033)
     print(" done.")
 
@@ -94,21 +166,59 @@ def record_position(client, body_name: str, label: str, num_samples: int = 60) -
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Mode: Debug — Print Raw OptiTrack Data
+# ──────────────────────────────────────────────────────────────────────────────
+
+def run_debug(client):
+    """Continuously print all rigid body data from OptiTrack."""
+    print(f"""
+╔══════════════════════════════════════════════════════════════════════╗
+║              OptiTrack Debug — Raw Data Stream                      ║
+╠══════════════════════════════════════════════════════════════════════╣
+║  Printing all rigid body data. Press Ctrl+C to stop.               ║
+╚══════════════════════════════════════════════════════════════════════╝
+""")
+    print(f"  Server: {client.server_app_name or 'unknown'}")
+    print(f"  NatNet version: {client.natnet_version}")
+    print(f"  Rigid body IDs: {dict(client._id_to_name)}")
+    print()
+
+    try:
+        while True:
+            bodies = client.get_rigid_bodies()
+            if not bodies:
+                print(f"  [No bodies] frames={client.get_frame_count()}", end="\r")
+            else:
+                lines = []
+                for name, body in bodies.items():
+                    p = body.position
+                    q = body.quaternion
+                    tv = "OK" if body.tracking_valid else "LOST"
+                    lines.append(
+                        f"  {name} (id={body.id}) [{tv}] "
+                        f"pos=({p[0]:+.4f}, {p[1]:+.4f}, {p[2]:+.4f}) "
+                        f"quat=({q[0]:+.3f}, {q[1]:+.3f}, {q[2]:+.3f}, {q[3]:+.3f})"
+                    )
+                print(f"  frame={client.get_frame_count()}")
+                for line in lines:
+                    print(line)
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\n[Debug] Stopped.")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Mode 1: Depth Estimation (CS-100 L-Shape on Floor)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def calibrate_depth(client, body_name: str, config: dict) -> dict:
     """
     Estimate camera-to-floor depth using CS-100 placed flat on the floor.
-
-    Uses the known L-shape geometry (8cm + 10cm edges) to validate
-    tracking accuracy and compute the floor plane.
     """
     depth_cfg = config.get("depth_estimation", {})
     objects_cfg = config.get("objects", {})
-    cs100_cfg = objects_cfg.get(body_name, {})
+    cs100_cfg = objects_cfg.get(body_name, objects_cfg.get("CS-100", {}))
 
-    # Create geometry model from config
     cs100 = CS100Geometry(
         short_arm_length=cs100_cfg.get("short_arm_length", 0.08),
         long_arm_length=cs100_cfg.get("long_arm_length", 0.10),
@@ -139,27 +249,80 @@ def calibrate_depth(client, body_name: str, config: dict) -> dict:
 
     input("  Place CS-100 flat on the floor, then press Enter...")
 
-    print(f"  Recording {num_samples} frames...", end="", flush=True)
+    print(f"  Recording {num_samples} frames...")
     valid_count = 0
-    for _ in range(num_samples * 2):  # Allow up to 2x attempts
-        bodies = client.get_rigid_bodies()
-        if body_name in bodies and bodies[body_name].tracking_valid:
-            body = bodies[body_name]
-            estimator.record_sample(body.position, body.quaternion)
-            valid_count += 1
-            if valid_count >= num_samples:
-                break
-        time.sleep(0.033)
-    print(f" done ({valid_count} valid frames).")
+    skip_count = 0
+    no_body_count = 0
+    bad_pos_count = 0
 
-    if valid_count < num_samples // 2:
+    for attempt in range(num_samples * 3):
+        bodies = client.get_rigid_bodies()
+
+        if body_name not in bodies:
+            no_body_count += 1
+            time.sleep(0.033)
+            continue
+
+        body = bodies[body_name]
+        pos = body.position
+        quat = body.quaternion
+
+        # Validate data quality — accept even if tracking_valid is False,
+        # as long as the position is finite and reasonable.
+        if not np.all(np.isfinite(pos)) or not np.all(np.isfinite(quat)):
+            bad_pos_count += 1
+            time.sleep(0.033)
+            continue
+
+        if np.linalg.norm(pos) > 100.0:
+            bad_pos_count += 1
+            time.sleep(0.033)
+            continue
+
+        # Quaternion must be non-zero
+        if np.linalg.norm(quat) < 0.5:
+            bad_pos_count += 1
+            time.sleep(0.033)
+            continue
+
+        estimator.record_sample(pos, quat)
+        valid_count += 1
+
+        # Progress indicator
+        if valid_count % 10 == 0:
+            print(f"    {valid_count}/{num_samples} samples collected...")
+
+        if valid_count >= num_samples:
+            break
+
+        time.sleep(0.033)
+
+    print(f"  Done: {valid_count} valid, {no_body_count} no-body, {bad_pos_count} bad-data")
+
+    if valid_count == 0:
+        # Print detailed diagnostics
+        print(f"\n[ERROR] 0 valid samples collected.")
+        print(f"  Diagnostics:")
+        print(f"    Body name searched: '{body_name}'")
+        print(f"    Frames received by client: {client.get_frame_count()}")
+        print(f"    Known rigid body IDs: {dict(client._id_to_name)}")
+        bodies = client.get_rigid_bodies()
+        if bodies:
+            print(f"    Bodies currently available: {list(bodies.keys())}")
+            for n, b in bodies.items():
+                print(f"      '{n}': tracking_valid={b.tracking_valid}, "
+                      f"pos={b.position}, quat={b.quaternion}")
+        else:
+            print(f"    No bodies currently available")
         raise RuntimeError(
-            f"Too few valid readings ({valid_count}/{num_samples}). "
-            f"Is the CS-100 visible?"
+            f"No valid readings. Is '{body_name}' defined in Motive and visible?"
         )
 
+    if valid_count < num_samples // 2:
+        print(f"  [WARNING] Only {valid_count}/{num_samples} valid readings.")
+
     # Compute depth
-    result = estimator.compute(min_samples=min(valid_count, num_samples // 2))
+    result = estimator.compute(min_samples=min(valid_count, 3))
     estimator.print_report()
 
     # Check flatness
@@ -205,9 +368,7 @@ def calibrate_depth(client, body_name: str, config: dict) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def calibrate_3point_frame(client, body_name: str, table_height: float) -> dict:
-    """
-    Define the world coordinate frame from 3 placements of the CS-100.
-    """
+    """Define the world coordinate frame from 3 placements of the CS-100."""
     print(f"""
 ╔══════════════════════════════════════════════════════════════════════╗
 ║           3-Point Frame Calibration (CS-100)                        ║
@@ -365,11 +526,11 @@ def main():
     )
     parser.add_argument(
         "--body", default=None,
-        help="Rigid body name in Motive (default: CS-100 from config)",
+        help="Rigid body name in Motive (default: auto-detect from config)",
     )
     parser.add_argument(
-        "--mode", choices=["depth", "frame", "svd"], default="depth",
-        help="Calibration mode: 'depth' (default), 'frame', or 'svd'",
+        "--mode", choices=["depth", "frame", "svd", "debug"], default="depth",
+        help="Calibration mode: 'depth' (default), 'frame', 'svd', or 'debug'",
     )
     parser.add_argument(
         "--table-height", type=float, default=0.0,
@@ -392,24 +553,28 @@ def main():
         data_port=optitrack_cfg.get("data_port", 1511),
     )
     client.start()
-    time.sleep(1.0)
+    time.sleep(1.5)
 
-    # Find calibration body
-    body_name = args.body
-    if body_name is None:
+    print(f"[Calibration] NatNet version: {client.natnet_version}")
+    print(f"[Calibration] Server: {client.server_app_name or 'no response'}")
+    print(f"[Calibration] Frames received: {client.get_frame_count()}")
+
+    # Debug mode — just print data and exit
+    if args.mode == "debug":
+        run_debug(client)
+        client.stop()
+        return
+
+    # Determine body name
+    preferred_name = args.body
+    if preferred_name is None:
         cal_cfg = config.get("calibration", {})
-        preferred_name = cal_cfg.get("tool_body", None)
-        bodies = client.get_rigid_bodies()
-        if not bodies:
-            print("[Error] No rigid bodies detected. Is Motive streaming?")
-            client.stop()
-            return
-        if preferred_name and preferred_name in bodies:
-            body_name = preferred_name
-        else:
-            body_name = list(bodies.keys())[0]
+        preferred_name = cal_cfg.get("tool_body", "CS-100")
 
-    print(f"[Calibration] Using rigid body: '{body_name}'")
+    body_name = wait_for_body(client, preferred_name, timeout=10.0)
+    if body_name is None:
+        client.stop()
+        return
 
     try:
         if args.mode == "depth":
