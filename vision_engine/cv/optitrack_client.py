@@ -420,19 +420,18 @@ class OptiTrackClient:
         """
         Parse NAT_MODELDEF response to extract rigid body names and IDs.
 
+        Handles NatNet 3.x and 4.x formats. NatNet 4.0+ (Motive 3.x)
+        adds per-rigid-body marker data in the model definition.
+
         Layout:
           - int32 num_datasets
           - For each dataset:
             - int32 dataset_type (0=markerset, 1=rigid body, 2=skeleton)
             - [type-specific data]
-
-        For rigid body definitions (type 1):
-          - char[256] name (null-terminated) [NatNet 3.0+: variable-length]
-          - int32 id
-          - int32 parent_id
-          - float32[3] offset (x, y, z)
         """
         try:
+            natnet_major = self.natnet_version[0] if self.natnet_version[0] > 0 else 4
+
             num_datasets = struct.unpack_from("<i", data, offset)[0]
             offset += 4
 
@@ -448,10 +447,10 @@ class OptiTrackClient:
                     offset = self._skip_markerset_def(data, offset)
                 elif dataset_type == 1:
                     # Rigid body definition — extract name and ID
-                    offset = self._parse_rigid_body_def(data, offset)
+                    offset = self._parse_rigid_body_def(data, offset, natnet_major)
                 elif dataset_type == 2:
                     # Skeleton definition — skip
-                    offset = self._skip_skeleton_def(data, offset)
+                    offset = self._skip_skeleton_def(data, offset, natnet_major)
                 else:
                     # Unknown type, try to skip gracefully
                     break
@@ -459,19 +458,38 @@ class OptiTrackClient:
         except (struct.error, IndexError) as e:
             print(f"[OptiTrack] Warning: Error parsing model definitions: {e}")
 
-    def _parse_rigid_body_def(self, data: bytes, offset: int) -> int:
-        """Parse a single rigid body definition. Returns new offset."""
+    def _parse_rigid_body_def(self, data: bytes, offset: int,
+                              natnet_major: int = 4) -> int:
+        """
+        Parse a single rigid body definition. Returns new offset.
+
+        NatNet 4.0+ (Motive 3.x) adds per-body marker data:
+          - char[] name
+          - int32 id
+          - int32 parent_id
+          - float32[3] offset
+          - int32 num_markers          (NatNet 4.0+)
+          - float32[num_markers * 3]   marker positions (NatNet 4.0+)
+          - int32[num_markers]         active labels (NatNet 4.0+)
+        """
         # Name: null-terminated string
-        # NatNet 3.0+ uses variable-length strings, but for compatibility
-        # we read until null byte
         name, offset = self._read_cstring(data, offset)
 
-        # ID, parent ID, offset position
+        # ID, parent ID
         rb_id, parent_id = struct.unpack_from("<ii", data, offset)
         offset += 8
 
         # Offset (x, y, z) — relative to parent
         offset += 12  # 3 * float32
+
+        # NatNet 4.0+ (Motive 3.x): per-body marker data in model def
+        if natnet_major >= 4 and offset + 4 <= len(data):
+            num_markers = struct.unpack_from("<i", data, offset)[0]
+            offset += 4
+            # Marker positions: float32[num_markers * 3]
+            offset += num_markers * 12
+            # Active labels: int32[num_markers]
+            offset += num_markers * 4
 
         self._id_to_name[rb_id] = name
         return offset
@@ -488,7 +506,8 @@ class OptiTrackClient:
             _, offset = self._read_cstring(data, offset)
         return offset
 
-    def _skip_skeleton_def(self, data: bytes, offset: int) -> int:
+    def _skip_skeleton_def(self, data: bytes, offset: int,
+                           natnet_major: int = 4) -> int:
         """Skip a skeleton definition. Returns new offset."""
         # Name
         _, offset = self._read_cstring(data, offset)
@@ -498,7 +517,7 @@ class OptiTrackClient:
         num_bodies = struct.unpack_from("<i", data, offset)[0]
         offset += 4
         for _ in range(num_bodies):
-            offset = self._parse_rigid_body_def(data, offset)
+            offset = self._parse_rigid_body_def(data, offset, natnet_major)
         return offset
 
     def _parse_frame_data(self, data: bytes, offset: int) -> None:

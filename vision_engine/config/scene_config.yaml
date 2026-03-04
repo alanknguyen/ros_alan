@@ -41,7 +41,7 @@ optitrack:
 #             This body is excluded from physics predictions.
 calibration:
   file: "config/calibration.yaml"
-  tool_body: "CS-100"
+  tool_body: "Rigid_3_Balls"       # Must match the rigid body name in Motive
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -109,7 +109,8 @@ objects:
   # OptiTrack CS-100 Calibration Square — L-shape with 3 retroreflective markers.
   # Corner marker at L vertex, short arm = 8cm, long arm = 10cm (perpendicular).
   # Rendered as 3 colored spheres + connecting lines in the 3D view.
-  CS-100:
+  # Name MUST match the rigid body name in Motive (e.g., "Rigid_3_Balls").
+  Rigid_3_Balls:
     render_as: "cs100_lshape"
     short_arm_length: 0.08        # meters (corner to 8cm marker)
     long_arm_length: 0.10         # meters (corner to 10cm marker)
@@ -185,7 +186,7 @@ physics:
 # The CS-100 is placed flat on the floor and its known L-shape geometry
 # (8cm + 10cm edges) validates tracking accuracy and computes the floor plane.
 depth_estimation:
-  cs100_body: "CS-100"
+  cs100_body: "Rigid_3_Balls"
   num_samples: 60                 # Frames to average for floor measurement
   flatness_threshold_deg: 5.0     # Max tilt before warning (should be ~0 on flat floor)
   distance_tolerance_mm: 2.0      # Max marker distance error for validation
