@@ -1,10 +1,9 @@
 # vision_engine/cv — Computer Vision module
 #
-# This module handles:
-#   - OptiTrack V120:Trio rigid body capture (NatNet protocol)
-#   - Scene state aggregation and time synchronization
-#   - Camera projection/unprojection (pinhole model)
-#   - OpenCV 2D annotation overlays
-#   - Scene-to-language conversion for VLM/VLA/LLM
-#   - RGB-D depth processing and point cloud generation
-#   - Coordinate frame transforms and calibration math
+# Writers: Nguyen Nguyen (Alan), Sauman Raaj
+#
+# This module provides:
+#   - OptiTrack V120:Trio NatNet client (optitrack_client.py)
+#   - Coordinate frame transforms and calibration math (transforms.py)
+#   - CS-100 L-shape geometry model (cs100_model.py)
+#   - Floor depth estimation from CS-100 (depth_estimator.py)

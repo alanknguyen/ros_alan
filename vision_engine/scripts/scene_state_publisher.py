@@ -2,11 +2,28 @@
 """
 scene_state_publisher.py — OptiTrack Scene State Publisher + CS-100 Tracker
 
-Reads 6DOF rigid body poses from OptiTrack via NatNet and publishes them
-as structured pose messages for Sauman's LLM reasoning system.
+Writers: Nguyen Nguyen (Alan), Sauman Raaj
+
+Coordinate System & Physics
+----------------------------
+OptiTrack V120:Trio defaults to Y-up (Motive convention):
+    X = right,  Y = up (height),  Z = toward cameras
+
+This engine converts to Z-up (robotics convention) by default:
+    x_zup =  x_yup
+    y_zup = -z_yup
+    z_zup =  y_yup
+
+The conversion is a 90° rotation about X:
+    R = [[1, 0, 0], [0, 0, -1], [0, 1, 0]]
+
+In --plot mode, raw Y-up values are shown (no conversion) to aid
+hardware debugging and Z₀ distance calibration.
+
+Quaternion convention: (x, y, z, w), Hamilton, matching OptiTrack/ROS.
 
 Modes
-─────
+-----
     (default)   : Prints pose messages to console
     --ros       : Publishes to /llm/scene_state as ROS String messages
     --track     : Opens OpenCV window tracking CS-100 center + 2D path on desk
@@ -14,7 +31,7 @@ Modes
     --demo      : Simulated data, no OptiTrack hardware needed
 
 Usage
-─────
+-----
     # Live OptiTrack, print to console:
     python scene_state_publisher.py --objects config/objects.yaml --ip 192.168.0.101
 
@@ -42,7 +59,7 @@ from typing import Dict, List, Tuple, Optional
 
 import yaml
 
-# ── Resolve imports ──────────────────────────────────────────────────────────
+# Resolve imports from parent directory
 _script_dir = Path(__file__).resolve().parent
 _engine_dir = _script_dir.parent
 if str(_engine_dir) not in sys.path:
@@ -53,12 +70,10 @@ from cv.cs100_model import CS100Geometry
 from cv.transforms import quaternion_to_euler
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Object Registry
-# ═════════════════════════════════════════════════════════════════════════════
+# --- Object Registry ---
 
 def load_object_registry(yaml_path: str) -> Dict[str, str]:
-    """Load objects.yaml → returns {optitrack_body_name: display_name}."""
+    """Load objects.yaml and return {optitrack_body_name: display_name}."""
     if not Path(yaml_path).exists():
         print(f"[SceneState] WARNING: {yaml_path} not found, using raw body names")
         return {}
@@ -85,11 +100,10 @@ def load_object_registry(yaml_path: str) -> Dict[str, str]:
     return body_to_name
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Format rigid body pose message
-# ═════════════════════════════════════════════════════════════════════════════
+# --- Message Formatting ---
 
 def format_body_message(display_name: str, body: RigidBodyState) -> str:
+    """Format a single rigid body pose as a human-readable string."""
     px, py, pz = body.position
     qx, qy, qz, qw = body.quaternion
     lines = [
@@ -113,6 +127,7 @@ def format_scene_message(
     bodies: Dict[str, RigidBodyState],
     body_to_name: Dict[str, str],
 ) -> str:
+    """Format all tracked bodies into a single scene state message."""
     blocks = []
     for body_name, body in sorted(bodies.items()):
         if not body.tracking_valid:
@@ -125,9 +140,7 @@ def format_scene_message(
     return "\n---\n".join(blocks)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Demo Data Generator
-# ═════════════════════════════════════════════════════════════════════════════
+# --- Demo Data Generator ---
 
 class DemoOptiTrack:
     """Simulates OptiTrack data — CS-100 draws a figure-8 on the desk."""
@@ -141,7 +154,7 @@ class DemoOptiTrack:
 
         # CS-100: figure-8 (lemniscate) pattern on the desk
         scale = 0.15
-        cx, cy = 0.45, 0.0  # center of desk
+        cx, cy = 0.45, 0.0
         denom = 1 + math.sin(t * 0.4) ** 2
         x = cx + scale * math.cos(t * 0.4) / denom
         y = cy + scale * math.sin(t * 0.4) * math.cos(t * 0.4) / denom
@@ -161,7 +174,6 @@ class DemoOptiTrack:
             ),
         }
 
-        # Also add some other objects for completeness
         bodies["rigid_body_1"] = RigidBodyState(
             name="rigid_body_1", id=2,
             position=np.array([0.30, -0.15, 0.735]),
@@ -184,28 +196,24 @@ class DemoOptiTrack:
         pass
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# CS-100 2D Path Tracker (OpenCV visualization)
-# ═════════════════════════════════════════════════════════════════════════════
+# --- CS-100 2D Path Tracker (OpenCV visualization) ---
 
 def run_tracker(args):
     """
     Track the CS-100 rigid body and visualize it in real-time on a 2D desk view.
 
-    Shows:
-    - The actual CS-100 L-shape (3 markers + arms) with live orientation
-    - Center position trail (fading orange path)
-    - Grid overlay for scale
-    - Live readout: position, orientation (roll/pitch/yaw), height
+    Shows the actual CS-100 L-shape (3 markers + arms) with live orientation,
+    center position trail, grid overlay for scale, and live readout of
+    position, orientation (roll/pitch/yaw), and height.
     """
     import cv2
 
-    BODY_NAME = args.body  # default: "Rigid_3_Balls"
+    BODY_NAME = args.body
 
     # CS-100 geometry model (8cm short arm, 10cm long arm)
     cs100 = CS100Geometry(short_arm_length=0.08, long_arm_length=0.10)
 
-    # ── Connect ──────────────────────────────────────────────────────────
+    # Connect to OptiTrack or use demo data
     if args.demo:
         print("[Tracker] Demo mode — simulated CS-100 figure-8 motion")
         client = DemoOptiTrack()
@@ -214,10 +222,10 @@ def run_tracker(args):
         client = OptiTrackClient(server_ip=args.ip)
         client.start()
 
-    # ── Display settings ─────────────────────────────────────────────────
+    # Display settings
     WIN_W, WIN_H = 900, 750
     MARGIN = 60
-    INFO_H = 80  # height of info panel at bottom
+    INFO_H = 80
 
     # Desk bounds in meters (auto-adjusts)
     desk_x_range = [0.1, 0.8]
@@ -230,25 +238,24 @@ def run_tracker(args):
     DESK_COLOR      = (50, 45, 40)
     DESK_BORDER     = (80, 80, 80)
     TRAIL_COLOR     = (0, 200, 255)      # orange
-    CORNER_COLOR    = (0, 255, 255)      # yellow — corner marker
-    SHORT_ARM_COLOR = (0, 140, 255)      # orange — short arm marker (8cm)
-    LONG_ARM_COLOR  = (0, 255, 0)        # green — long arm marker (10cm)
-    ARM_LINE_COLOR  = (200, 200, 200)    # white — L-shape arms
-    FILL_COLOR      = (80, 120, 60)      # dark green — L-shape fill
-    CENTER_COLOR    = (255, 200, 0)      # cyan — center dot
+    CORNER_COLOR    = (0, 255, 255)      # yellow
+    SHORT_ARM_COLOR = (0, 140, 255)      # orange
+    LONG_ARM_COLOR  = (0, 255, 0)        # green
+    ARM_LINE_COLOR  = (200, 200, 200)    # white
+    FILL_COLOR      = (80, 120, 60)      # dark green
+    CENTER_COLOR    = (255, 200, 0)      # cyan
     LOST_COLOR      = (0, 0, 200)        # red
     TEXT_COLOR      = (220, 220, 220)
     DIM_TEXT        = (140, 140, 140)
 
-    # Trail buffer
     trail: deque = deque(maxlen=args.trail_length)
 
-    # Auto-range
+    # Auto-range tracking
     x_min_seen, x_max_seen = 999.0, -999.0
     y_min_seen, y_max_seen = 999.0, -999.0
 
     def world_to_px(wx: float, wy: float) -> Tuple[int, int]:
-        """Convert world XY (meters) → pixel coordinates on the canvas."""
+        """Convert world XY (meters) to pixel coordinates on the canvas."""
         plot_w = WIN_W - 2 * MARGIN
         plot_h = WIN_H - 2 * MARGIN - INFO_H
 
@@ -284,9 +291,9 @@ def run_tracker(args):
         bodies = client.get_rigid_bodies()
         body = bodies.get(BODY_NAME)
 
-        # ── Process body data ────────────────────────────────────────────
+        # Process body data
         current_body = None
-        marker_positions = None  # (3, 3): [corner, short_arm, long_arm]
+        marker_positions = None
         euler_deg = None
 
         if body is not None and body.tracking_valid:
@@ -298,25 +305,22 @@ def run_tracker(args):
                 last_valid_body = body
                 tracking_lost = False
 
-                # Trail (center position)
                 trail.append((float(pos[0]), float(pos[1]), t_frame))
                 expand_range(float(pos[0]), float(pos[1]))
 
                 # Compute actual marker positions from L-shape geometry
                 marker_positions = cs100.compute_marker_positions(pos, quat)
-
-                # Expand range to fit markers too
                 for m in marker_positions:
                     expand_range(float(m[0]), float(m[1]))
 
-                # Euler angles
+                # Euler angles for display
                 roll, pitch, yaw = quaternion_to_euler(
                     quat[0], quat[1], quat[2], quat[3])
                 euler_deg = (np.degrees(roll), np.degrees(pitch), np.degrees(yaw))
         else:
             tracking_lost = True
 
-        # ── Draw ─────────────────────────────────────────────────────────
+        # Draw canvas
         canvas = np.full((WIN_H, WIN_W, 3), BG_COLOR, dtype=np.uint8)
 
         # Desk rectangle
@@ -345,7 +349,7 @@ def run_tracker(args):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.3, GRID_TEXT_COLOR, 1)
             gy += grid_step
 
-        # ── Trail (fading orange path) ───────────────────────────────────
+        # Trail (fading orange path)
         trail_list = list(trail)
         n = len(trail_list)
         for i in range(1, n):
@@ -363,9 +367,8 @@ def run_tracker(args):
             if dx < 0.3 and dy < 0.3:
                 cv2.line(canvas, p1, p2, color, thickness, cv2.LINE_AA)
 
-        # ── Draw CS-100 L-shape ──────────────────────────────────────────
+        # Draw CS-100 L-shape
         if current_body is not None and marker_positions is not None:
-            # Pixel positions of the 3 markers (top-down XY)
             corner_px   = world_to_px(marker_positions[0][0], marker_positions[0][1])
             short_px    = world_to_px(marker_positions[1][0], marker_positions[1][1])
             long_px     = world_to_px(marker_positions[2][0], marker_positions[2][1])
@@ -376,16 +379,15 @@ def run_tracker(args):
             tri_pts = np.array([corner_px, short_px, long_px], dtype=np.int32)
             cv2.fillPoly(canvas, [tri_pts], FILL_COLOR, cv2.LINE_AA)
 
-            # L-shape arms (corner → short, corner → long)
+            # L-shape arms
             cv2.line(canvas, corner_px, short_px, ARM_LINE_COLOR, 2, cv2.LINE_AA)
             cv2.line(canvas, corner_px, long_px, ARM_LINE_COLOR, 2, cv2.LINE_AA)
-            # Hypotenuse (dashed feel — thinner)
             cv2.line(canvas, short_px, long_px, (120, 120, 120), 1, cv2.LINE_AA)
 
             # Marker dots
-            cv2.circle(canvas, corner_px, 7, CORNER_COLOR, -1, cv2.LINE_AA)    # yellow
-            cv2.circle(canvas, short_px,  6, SHORT_ARM_COLOR, -1, cv2.LINE_AA) # orange
-            cv2.circle(canvas, long_px,   6, LONG_ARM_COLOR, -1, cv2.LINE_AA)  # green
+            cv2.circle(canvas, corner_px, 7, CORNER_COLOR, -1, cv2.LINE_AA)
+            cv2.circle(canvas, short_px,  6, SHORT_ARM_COLOR, -1, cv2.LINE_AA)
+            cv2.circle(canvas, long_px,   6, LONG_ARM_COLOR, -1, cv2.LINE_AA)
 
             # Marker labels
             cv2.putText(canvas, "C", (corner_px[0] + 10, corner_px[1] - 8),
@@ -407,26 +409,23 @@ def run_tracker(args):
             cv2.putText(canvas, "TRACKING LOST", (px + 16, py_cv + 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, LOST_COLOR, 1)
 
-        # ── Info panel (bottom) ──────────────────────────────────────────
+        # Info panel (bottom)
         info_top = WIN_H - INFO_H
         cv2.rectangle(canvas, (0, info_top), (WIN_W, WIN_H), (40, 40, 40), -1)
         cv2.line(canvas, (0, info_top), (WIN_W, info_top), DESK_BORDER, 1)
 
         if current_body is not None:
             pos = current_body.position
-            # Line 1: Position
             cv2.putText(canvas,
                 f"Position:  X={pos[0]:.4f}  Y={pos[1]:.4f}  Z={pos[2]:.4f} m",
                 (10, info_top + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, TEXT_COLOR, 1)
 
-            # Line 2: Orientation
             if euler_deg is not None:
                 cv2.putText(canvas,
                     f"Orientation:  Roll={euler_deg[0]:.1f}  "
                     f"Pitch={euler_deg[1]:.1f}  Yaw={euler_deg[2]:.1f} deg",
                     (10, info_top + 42), cv2.FONT_HERSHEY_SIMPLEX, 0.45, TEXT_COLOR, 1)
 
-            # Line 3: Quaternion
             q = current_body.quaternion
             cv2.putText(canvas,
                 f"Quaternion:  x={q[0]:.3f}  y={q[1]:.3f}  z={q[2]:.3f}  w={q[3]:.3f}",
@@ -439,7 +438,7 @@ def run_tracker(args):
             cv2.putText(canvas, f"Waiting for body '{BODY_NAME}'...",
                         (10, info_top + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, DIM_TEXT, 1)
 
-        # Right side: trail stats
+        # Trail stats (right side)
         elapsed = t_frame - start_time
         cv2.putText(canvas,
             f"Trail: {len(trail_list)} pts | {elapsed:.0f}s | Frame {frame_count}",
@@ -448,7 +447,7 @@ def run_tracker(args):
             "'q' quit | 'c' clear trail | 'r' reset view",
             (WIN_W - 320, info_top + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.30, DIM_TEXT, 1)
 
-        # ── Title ────────────────────────────────────────────────────────
+        # Title
         cv2.putText(canvas, "CS-100 Rigid Body Tracker", (10, 22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, TEXT_COLOR, 1)
 
@@ -468,7 +467,7 @@ def run_tracker(args):
         cv2.putText(canvas, "Long (10cm)", (lx + 10, 48),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.3, LONG_ARM_COLOR, 1)
 
-        # ── Show ─────────────────────────────────────────────────────────
+        # Show frame
         cv2.imshow("CS-100 Rigid Body Tracker", canvas)
         key = cv2.waitKey(max(1, int(1000 / args.rate))) & 0xFF
 
@@ -492,9 +491,7 @@ def run_tracker(args):
     print(f"[Tracker] Done. {frame_count} frames, {len(trail)} trail points.")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Real-Time Plot Mode (matplotlib)
-# ═════════════════════════════════════════════════════════════════════════════
+# --- Real-Time Plot Mode (matplotlib) ---
 
 def run_plotter(args):
     """
@@ -502,16 +499,16 @@ def run_plotter(args):
     over time using matplotlib.
 
     Uses convert_to_zup=False so we see exactly what Motive sends.
-    Includes Z₀ calibration: place CS-100 under camera 2, press 'c' in
+    Includes Z0 calibration: place CS-100 under camera 2, press 'c' in
     terminal to capture reference distance, then all positions are scaled.
     """
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
 
     BODY_NAME = args.body
-    WINDOW_SEC = args.plot_window  # seconds of data to show
+    WINDOW_SEC = args.plot_window
 
-    # ── Connect (RAW Y-up — no conversion) ───────────────────────────────
+    # Connect (RAW Y-up, no conversion)
     if args.demo:
         print("[Plot] Demo mode — simulated data")
         client = DemoOptiTrack()
@@ -520,7 +517,7 @@ def run_plotter(args):
         client = OptiTrackClient(server_ip=args.ip, convert_to_zup=False)
         client.start()
 
-    # ── Data buffers ─────────────────────────────────────────────────────
+    # Data buffers
     max_pts = args.rate * WINDOW_SEC
     ts = deque(maxlen=max_pts)
     pxs = deque(maxlen=max_pts)   # raw X (Motive Y-up frame)
@@ -536,32 +533,32 @@ def run_plotter(args):
     last_print = [0.0]
     frame_counter = [0]
 
-    # ── Z₀ calibration state ─────────────────────────────────────────────
+    # Z0 calibration state
     # User places CS-100 directly under camera 2, presses 'c' to capture.
     # We record the raw Y value (vertical in Y-up frame) and compare to
     # the known real distance (default ~44 inches = 1.118m).
     z0_real_m = args.z0_inches * 0.0254 if args.z0_inches else None
-    z0_raw = [None]          # raw Y value at calibration moment
-    z0_scale = [1.0]         # scale factor: real / raw
+    z0_raw = [None]
+    z0_scale = [1.0]
     z0_calibrated = [False]
-    cal_samples = []         # accumulate samples for averaging
+    cal_samples = []
 
-    # ── Print header ─────────────────────────────────────────────────────
+    # Print header
     print("=" * 80)
     print("  RAW Y-UP PLOTTER  —  Values are exactly as Motive sends them")
     print("  Motive Y-up convention: X=right, Y=UP, Z=forward (toward camera)")
     print("=" * 80)
     if z0_real_m:
-        print(f"  Z₀ calibration enabled: real distance = {args.z0_inches} inches"
+        print(f"  Z0 calibration enabled: real distance = {args.z0_inches} inches"
               f" = {z0_real_m:.4f} m")
         print(f"  Place CS-100 directly under Camera 2, then press 'c' in this")
         print(f"  terminal to capture the reference. (Averages 30 frames.)")
     else:
-        print(f"  Tip: use --z0-inches 44 to enable Z₀ distance calibration")
+        print(f"  Tip: use --z0-inches 44 to enable Z0 distance calibration")
     print("=" * 80)
     print()
 
-    # ── Set up figure ────────────────────────────────────────────────────
+    # Set up figure
     plt.style.use("dark_background")
     fig, axes = plt.subplots(4, 1, figsize=(13, 10), sharex=True)
 
@@ -570,7 +567,6 @@ def run_plotter(args):
         f"RAW Y-up Pose  —  '{BODY_NAME}'{cal_label}",
         fontsize=13, fontweight="bold")
 
-    # Subplot labels — RAW Y-up axes
     axes[0].set_ylabel("raw px (m)\n← left / right →", fontsize=9)
     axes[1].set_ylabel("raw py (m)\n↑ UP (height)", fontsize=9, color="#51cf66")
     axes[2].set_ylabel("raw pz (m)\n← back / fwd →", fontsize=9)
@@ -581,9 +577,9 @@ def run_plotter(args):
         ax.grid(True, alpha=0.3)
         ax.tick_params(labelsize=8)
 
-    # Create lines
+    # Create plot lines
     l_px, = axes[0].plot([], [], color="#ff6b6b", linewidth=1.2)
-    l_py, = axes[1].plot([], [], color="#51cf66", linewidth=1.5)  # bold — height
+    l_py, = axes[1].plot([], [], color="#51cf66", linewidth=1.5)
     l_pz, = axes[2].plot([], [], color="#339af0", linewidth=1.2)
 
     l_qx, = axes[3].plot([], [], color="#ff6b6b", linewidth=1, label="qx")
@@ -594,24 +590,24 @@ def run_plotter(args):
 
     lines = [l_px, l_py, l_pz, l_qx, l_qy, l_qz, l_qw]
 
-    # Status text
     status_text = fig.text(0.02, 0.01, "Waiting for body...",
                            fontsize=8, color="#aaaaaa", family="monospace")
 
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
 
-    # ── Terminal input thread (for 'c' key calibration) ──────────────────
-    import threading, select
+    # Terminal input thread (for 'c' key Z0 calibration)
+    import threading
+
     cal_trigger = [False]
 
     def _input_listener():
-        """Listen for 'c' key press in terminal for Z₀ calibration."""
+        """Listen for 'c' key press in terminal for Z0 calibration."""
         while True:
             try:
                 line = input()
                 if line.strip().lower() == 'c':
                     cal_trigger[0] = True
-                    print("[Cal] Capturing Z₀ reference... hold CS-100 steady!")
+                    print("[Cal] Capturing Z0 reference... hold CS-100 steady!")
             except (EOFError, KeyboardInterrupt):
                 break
 
@@ -619,7 +615,7 @@ def run_plotter(args):
         t = threading.Thread(target=_input_listener, daemon=True)
         t.start()
 
-    # ── Animation update ─────────────────────────────────────────────────
+    # Animation update function
     def update(frame_num):
         t_now = time.time() - t0
         bodies = client.get_rigid_bodies()
@@ -629,15 +625,15 @@ def run_plotter(args):
         client_frames = client.get_frame_count() if hasattr(client, 'get_frame_count') else -1
 
         if body is not None:
-            pos = body.position     # RAW Y-up: [px, py, pz]
-            quat = body.quaternion  # RAW: [qx, qy, qz, qw]
+            pos = body.position
+            quat = body.quaternion
             pos_ok = np.all(np.isfinite(pos)) and np.linalg.norm(pos) < 50.0
             quat_ok = np.all(np.isfinite(quat)) and np.linalg.norm(quat) > 0.1
 
             if pos_ok:
                 body_found_ever[0] = True
 
-                # ── Z₀ calibration capture ───────────────────────────
+                # Z0 calibration capture
                 if cal_trigger[0] and z0_real_m:
                     cal_samples.append(float(pos[1]))  # Y is UP in Y-up
                     if len(cal_samples) >= 30:
@@ -649,7 +645,7 @@ def run_plotter(args):
                             z0_scale[0] = 1.0
                         z0_calibrated[0] = True
                         print(f"\n{'='*60}")
-                        print(f"  Z₀ CALIBRATION COMPLETE")
+                        print(f"  Z0 CALIBRATION COMPLETE")
                         print(f"  Raw Y (height):   {z0_raw[0]:+.6f}")
                         print(f"  Real distance:    {z0_real_m:.4f} m "
                               f"({args.z0_inches} in)")
@@ -683,7 +679,7 @@ def run_plotter(args):
                     qzs.append(float("nan"))
                     qws.append(float("nan"))
 
-                # ── Terminal print every 0.5s ────────────────────────
+                # Terminal print every 0.5s
                 if t_now - last_print[0] >= 0.5:
                     last_print[0] = t_now
                     cal_str = f"  SCALE={z0_scale[0]:.2f}x" if z0_calibrated[0] else "  (raw)"
@@ -723,7 +719,7 @@ def run_plotter(args):
                 print(f"[{t_now:6.1f}s] BODY '{BODY_NAME}' NOT FOUND. "
                       f"Available: {', '.join(names)}")
 
-        # ── Update line data ─────────────────────────────────────────
+        # Update line data
         if len(ts) > 1:
             t_list = list(ts)
             t_min = max(0, t_list[-1] - WINDOW_SEC)
@@ -744,7 +740,7 @@ def run_plotter(args):
 
         return lines + [status_text]
 
-    # ── Run ──────────────────────────────────────────────────────────────
+    # Run animation
     interval_ms = max(16, int(1000 / args.rate))
     anim = FuncAnimation(fig, update, interval=interval_ms, blit=False, cache_frame_data=False)
 
@@ -760,9 +756,7 @@ def run_plotter(args):
     print("[Plot] Done.")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Console / ROS Mode
-# ═════════════════════════════════════════════════════════════════════════════
+# --- Console / ROS Mode ---
 
 def run_publisher(args):
     """Run in console-print or ROS mode."""
@@ -813,7 +807,7 @@ def run_publisher(args):
             ros_pub.publish(String(data=msg_text))
         else:
             print(f"\033[2J\033[H", end="")
-            print(f"═══ Scene State (frame {count}) ═══")
+            print(f"--- Scene State (frame {count}) ---")
             print(msg_text)
             print(f"\n[{time.strftime('%H:%M:%S')}] Rate: {args.rate} Hz | "
                   f"Bodies: {sum(1 for b in bodies.values() if b.tracking_valid)}")
@@ -828,9 +822,7 @@ def run_publisher(args):
     print(f"[SceneState] Done. {count} frames published.")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Entry Point
-# ═════════════════════════════════════════════════════════════════════════════
+# --- Entry Point ---
 
 def main():
     parser = argparse.ArgumentParser(

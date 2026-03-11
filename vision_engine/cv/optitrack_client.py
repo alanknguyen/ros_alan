@@ -1,24 +1,30 @@
 """
 vision_engine/cv/optitrack_client.py — NatNet Protocol Client for OptiTrack V120:Trio
 
-Implements a pure-Python NatNet 3.x/4.x client that connects to the OptiTrack Motive
-software and receives rigid body tracking data over UDP.
+Writers: Nguyen Nguyen (Alan), Sauman Raaj
+
+Implements a pure-Python NatNet 3.x/4.x client that connects to OptiTrack Motive
+and receives rigid body tracking data over UDP.
 
 Architecture
 ------------
 The OptiTrack V120:Trio is a self-contained 3-camera tracking bar. It connects via
-USB to a Windows PC running Motive, which processes marker data and streams it via
-the NatNet protocol over the local network.
+USB to a Windows PC running Motive, which streams data via NatNet over the network.
 
 NatNet uses two UDP channels:
-  - **Command socket** (unicast, default port 1510): Request/response for server info,
-    model definitions, and configuration.
-  - **Data socket** (multicast or unicast, default port 1511): Server broadcasts
-    frame data (rigid body poses, markers, etc.).
+  - Command socket (unicast, default port 1510): request/response for server info
+    and model definitions.
+  - Data socket (multicast or unicast, default port 1511): frame data broadcast
+    (rigid body poses, markers, etc.).
 
 Coordinate System
 -----------------
-OptiTrack/Motive defaults to Y-up. This client converts to Z-up by default.
+OptiTrack/Motive defaults to Y-up. This client converts to Z-up by default:
+    x_zup =  x_yup
+    y_zup = -z_yup
+    z_zup =  y_yup
+
+Set convert_to_zup=False to receive raw Y-up values (useful for debugging).
 
 Usage
 -----
@@ -45,24 +51,20 @@ from typing import Dict, Optional, Callable
 from cv.transforms import position_yup_to_zup, quaternion_yup_to_zup
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Data Structures
-# ──────────────────────────────────────────────────────────────────────────────
+# --- Data Structures ---
 
 @dataclass
 class RigidBodyState:
     """State of a single tracked rigid body at a moment in time."""
     name: str
     id: int
-    position: np.ndarray
-    quaternion: np.ndarray
-    timestamp: float
-    tracking_valid: bool
+    position: np.ndarray       # (3,) — XYZ in meters
+    quaternion: np.ndarray     # (4,) — (x, y, z, w) Hamilton convention
+    timestamp: float           # Unix time (seconds)
+    tracking_valid: bool       # Motive's tracking validity flag
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# NatNet Message Types
-# ──────────────────────────────────────────────────────────────────────────────
+# --- NatNet Message Types ---
 
 NAT_CONNECT            = 0
 NAT_SERVERINFO         = 1
@@ -75,9 +77,7 @@ NAT_FRAMEOFDATA        = 7
 NAT_UNRECOGNIZED       = 100
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# NatNet Client
-# ──────────────────────────────────────────────────────────────────────────────
+# --- NatNet Client ---
 
 class OptiTrackClient:
     """
@@ -102,12 +102,12 @@ class OptiTrackClient:
         self.data_port = data_port
         self.convert_to_zup = convert_to_zup
 
-        # Server info
+        # Server info (populated after start)
         self.server_app_name: str = ""
         self.server_app_version: tuple = (0, 0, 0, 0)
         self.natnet_version: tuple = (0, 0, 0, 0)
 
-        # Rigid body name lookup: id → name
+        # Rigid body name lookup: id -> name
         self._id_to_name: Dict[int, str] = {}
 
         # Latest rigid body states
@@ -130,9 +130,7 @@ class OptiTrackClient:
         self._data_thread: Optional[threading.Thread] = None
         self._running = False
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Public API
-    # ──────────────────────────────────────────────────────────────────────
+    # --- Public API ---
 
     def start(self) -> None:
         """Connect to Motive and begin receiving data."""
@@ -141,20 +139,20 @@ class OptiTrackClient:
         # Command socket (unicast)
         self._command_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._command_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._command_socket.bind(("", 0))  # Ephemeral port
+        self._command_socket.bind(("", 0))
         self._command_socket.settimeout(3.0)
 
-        # Data socket — bind to INADDR_ANY to receive BOTH unicast and multicast
+        # Data socket (bind INADDR_ANY to receive both unicast and multicast)
         self._data_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._data_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._data_socket.bind(("", self.data_port))
 
-        # Join multicast group (for multicast mode — harmless if Motive uses unicast)
+        # Join multicast group (harmless if Motive uses unicast)
         try:
             mreq = struct.pack(
                 "4s4s",
                 socket.inet_aton(self.multicast_ip),
-                socket.inet_aton("0.0.0.0"),  # INADDR_ANY — join on all interfaces
+                socket.inet_aton("0.0.0.0"),
             )
             self._data_socket.setsockopt(
                 socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq
@@ -189,7 +187,7 @@ class OptiTrackClient:
             print("[OptiTrack] Warning: No server response. "
                   "Check IP and network connectivity.")
 
-        # Request model definitions
+        # Request model definitions (rigid body names)
         self._send_command(NAT_REQUEST_MODELDEF, b"")
         time.sleep(0.5)
 
@@ -199,12 +197,12 @@ class OptiTrackClient:
         else:
             print("[OptiTrack] Warning: No rigid body definitions received.")
 
-        # Wait a bit more for first frame data
+        # Wait for first frame data
         time.sleep(0.5)
         if self._raw_data_packets == 0:
             print("[OptiTrack] Warning: No data packets received on port "
                   f"{self.data_port}.")
-            print("  Check Motive: View → Data Streaming → Broadcast Frame Data = ON")
+            print("  Check Motive: View > Data Streaming > Broadcast Frame Data = ON")
             print("  If using Unicast, ensure this machine's IP is in Motive's "
                   "unicast target list.")
         else:
@@ -248,9 +246,7 @@ class OptiTrackClient:
         """Set a callback called on every new frame (runs in data thread)."""
         self._callback = fn
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Socket Communication
-    # ──────────────────────────────────────────────────────────────────────
+    # --- Socket Communication ---
 
     def _send_command(self, msg_type: int, payload: bytes) -> None:
         """Send a NatNet command message to the server."""
@@ -261,7 +257,7 @@ class OptiTrackClient:
         )
 
     def _data_listener(self) -> None:
-        """Background thread: receive data packets."""
+        """Background thread: receive data packets on the data socket."""
         while self._running:
             try:
                 data, addr = self._data_socket.recvfrom(65536)
@@ -287,7 +283,7 @@ class OptiTrackClient:
                 break
 
     def _command_listener(self) -> None:
-        """Background thread: receive command responses."""
+        """Background thread: receive command responses on the command socket."""
         while self._running:
             try:
                 data, addr = self._command_socket.recvfrom(65536)
@@ -306,12 +302,10 @@ class OptiTrackClient:
                     continue
                 break
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Server Info Parser
-    # ──────────────────────────────────────────────────────────────────────
+    # --- Server Info Parser ---
 
     def _parse_server_info(self, data: bytes, offset: int) -> None:
-        """Parse NAT_SERVERINFO: char[256] name + uint8[4] appVer + uint8[4] natnetVer."""
+        """Parse NAT_SERVERINFO: app name + version + NatNet version."""
         try:
             app_name_raw = data[offset:offset + 256]
             null_idx = app_name_raw.find(b'\x00')
@@ -327,24 +321,16 @@ class OptiTrackClient:
         except (struct.error, IndexError):
             pass
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Model Definition Parser
-    # ──────────────────────────────────────────────────────────────────────
+    # --- Model Definition Parser ---
 
     def _parse_model_def(self, data: bytes, offset: int) -> None:
-        """
-        Parse NAT_MODELDEF response.
-
-        Handles dataset types 0-6 (NatNet 4.2).
-        Dumps hex on failure for debugging.
-        """
+        """Parse NAT_MODELDEF response. Handles dataset types 0-6 (NatNet 4.2)."""
         try:
             natnet_major = self.natnet_version[0] if self.natnet_version[0] > 0 else 4
 
             num_datasets = struct.unpack_from("<i", data, offset)[0]
             offset += 4
 
-            # Sanity check
             if num_datasets < 0 or num_datasets > 100:
                 print(f"[OptiTrack] Model def: bad num_datasets={num_datasets}, "
                       f"dumping first 64 bytes:")
@@ -391,18 +377,14 @@ class OptiTrackClient:
         offset += 4
         parent_id = struct.unpack_from("<i", data, offset)[0]
         offset += 4
-
-        # Offset position (x, y, z) — relative to parent
-        offset += 12  # 3 * float32
+        offset += 12  # offset position (3 floats)
 
         # NatNet 4.0+: per-body marker data
         if natnet_major >= 4 and offset + 4 <= len(data):
             num_markers = struct.unpack_from("<i", data, offset)[0]
             offset += 4
-            # Marker positions: float32[num_markers * 3]
-            offset += num_markers * 12
-            # Active labels: int32[num_markers]
-            offset += num_markers * 4
+            offset += num_markers * 12  # marker positions
+            offset += num_markers * 4   # active labels
 
         self._id_to_name[rb_id] = name
         print(f"[OptiTrack] Model def: rigid body '{name}' id={rb_id}")
@@ -430,34 +412,26 @@ class OptiTrackClient:
 
     def _skip_force_plate_def(self, data: bytes, offset: int) -> int:
         """Skip a force plate definition (NatNet 3.0+)."""
-        # ID, serial, width, length
-        offset += 4  # int32 ID
+        offset += 4  # ID
         _, offset = self._read_cstring(data, offset)  # serial number
-        offset += 4  # float32 width... actually this is complex
-        # Force plates have variable-length channel data — skip by scanning
-        # This is a rough skip; the format is complex
-        offset += 4  # float32 length
-        # Origin: float32 * 12 (3x4 matrix)
-        offset += 48
-        # Calibration matrix: float32 * 12
-        offset += 48
-        # Corners: float32 * 12 (4 corners × 3)
-        offset += 48
-        # Plate type: int32
-        offset += 4
-        # Channel count
+        offset += 4  # width
+        offset += 4  # length
+        offset += 48  # origin (3x4 matrix)
+        offset += 48  # calibration matrix
+        offset += 48  # corners (4 x 3 floats)
+        offset += 4   # plate type
         num_channels = struct.unpack_from("<i", data, offset)[0]
         offset += 4
         for _ in range(num_channels):
-            _, offset = self._read_cstring(data, offset)  # channel name
+            _, offset = self._read_cstring(data, offset)
         return offset
 
     def _skip_device_def(self, data: bytes, offset: int) -> int:
         """Skip a device definition (NatNet 3.0+)."""
-        offset += 4  # int32 ID
+        offset += 4  # ID
         _, offset = self._read_cstring(data, offset)  # name
-        offset += 4  # int32 serial
-        offset += 4  # int32 device type
+        offset += 4  # serial
+        offset += 4  # device type
         num_channels = struct.unpack_from("<i", data, offset)[0]
         offset += 4
         for _ in range(num_channels):
@@ -467,49 +441,42 @@ class OptiTrackClient:
     def _skip_camera_def(self, data: bytes, offset: int) -> int:
         """Skip a camera definition (NatNet 3.0+)."""
         _, offset = self._read_cstring(data, offset)  # name
-        # Position: float32 * 3
-        offset += 12
-        # Orientation: float32 * 4
-        offset += 16
+        offset += 12  # position (3 floats)
+        offset += 16  # orientation (4 floats)
         return offset
 
     def _skip_asset_def(self, data: bytes, offset: int,
                         natnet_major: int = 4) -> int:
         """Skip an asset definition (NatNet 4.1+)."""
         _, offset = self._read_cstring(data, offset)  # name
-        offset += 4  # int32 asset type
-        offset += 4  # int32 asset ID
-        # Rigid bodies in asset
+        offset += 4  # asset type
+        offset += 4  # asset ID
         num_rb = struct.unpack_from("<i", data, offset)[0]
         offset += 4
         for _ in range(num_rb):
             offset = self._parse_rigid_body_def(data, offset, natnet_major)
-        # Markers in asset
         num_markers = struct.unpack_from("<i", data, offset)[0]
         offset += 4
         for _ in range(num_markers):
-            _, offset = self._read_cstring(data, offset)  # marker name
-            offset += 4  # int32 marker ID
+            _, offset = self._read_cstring(data, offset)
+            offset += 4  # marker ID
         return offset
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Frame Data Parser
-    # ──────────────────────────────────────────────────────────────────────
+    # --- Frame Data Parser ---
 
     def _parse_frame_data(self, data: bytes, offset: int) -> None:
         """
         Parse NAT_FRAMEOFDATA — the main data path at ~120Hz.
 
         NatNet 4.x format:
-          frame_number → marker_sets → other_markers(=0) → rigid_bodies → ...
+          frame_number -> marker_sets -> other_markers(=0) -> rigid_bodies -> ...
         """
         now = time.time()
         natnet_major = self.natnet_version[0] if self.natnet_version[0] > 0 else 4
 
-        # Frame number
-        offset += 4
+        offset += 4  # frame number
 
-        # ── Marker Sets (skip) ──
+        # Marker sets (skip)
         num_marker_sets = struct.unpack_from("<i", data, offset)[0]
         offset += 4
         for _ in range(num_marker_sets):
@@ -518,12 +485,12 @@ class OptiTrackClient:
             offset += 4
             offset += num_markers * 12
 
-        # ── Other Markers (legacy, =0 in NatNet 4.x) ──
+        # Other markers (legacy, =0 in NatNet 4.x)
         num_other_markers = struct.unpack_from("<i", data, offset)[0]
         offset += 4
         offset += num_other_markers * 12
 
-        # ── Rigid Bodies ──
+        # Rigid bodies
         num_rigid_bodies = struct.unpack_from("<i", data, offset)[0]
         offset += 4
 
@@ -591,9 +558,7 @@ class OptiTrackClient:
                 except Exception as e:
                     print(f"[OptiTrack] Callback error: {e}")
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Helpers
-    # ──────────────────────────────────────────────────────────────────────
+    # --- Helpers ---
 
     @staticmethod
     def _read_cstring(data: bytes, offset: int) -> tuple:
