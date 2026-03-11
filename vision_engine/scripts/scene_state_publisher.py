@@ -498,8 +498,12 @@ def run_tracker(args):
 
 def run_plotter(args):
     """
-    Plot x, y, z position and quaternion (qx, qy, qz, qw) over time
-    using matplotlib. Useful for diagnosing coordinate ranges and tracking.
+    Plot RAW Y-up position (px, py, pz) and quaternion (qx, qy, qz, qw)
+    over time using matplotlib.
+
+    Uses convert_to_zup=False so we see exactly what Motive sends.
+    Includes Z₀ calibration: place CS-100 under camera 2, press 'c' in
+    terminal to capture reference distance, then all positions are scaled.
     """
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
@@ -507,21 +511,21 @@ def run_plotter(args):
     BODY_NAME = args.body
     WINDOW_SEC = args.plot_window  # seconds of data to show
 
-    # ── Connect ──────────────────────────────────────────────────────────
+    # ── Connect (RAW Y-up — no conversion) ───────────────────────────────
     if args.demo:
         print("[Plot] Demo mode — simulated data")
         client = DemoOptiTrack()
     else:
-        print(f"[Plot] Connecting to OptiTrack at {args.ip}...")
-        client = OptiTrackClient(server_ip=args.ip)
+        print(f"[Plot] Connecting to OptiTrack at {args.ip} (RAW Y-up, no conversion)...")
+        client = OptiTrackClient(server_ip=args.ip, convert_to_zup=False)
         client.start()
 
     # ── Data buffers ─────────────────────────────────────────────────────
     max_pts = args.rate * WINDOW_SEC
-    ts = deque(maxlen=max_pts)      # relative time
-    xs = deque(maxlen=max_pts)
-    ys = deque(maxlen=max_pts)
-    zs = deque(maxlen=max_pts)
+    ts = deque(maxlen=max_pts)
+    pxs = deque(maxlen=max_pts)   # raw X (Motive Y-up frame)
+    pys = deque(maxlen=max_pts)   # raw Y (UP in Motive)
+    pzs = deque(maxlen=max_pts)   # raw Z (Motive Y-up frame)
     qxs = deque(maxlen=max_pts)
     qys = deque(maxlen=max_pts)
     qzs = deque(maxlen=max_pts)
@@ -529,49 +533,91 @@ def run_plotter(args):
 
     t0 = time.time()
     body_found_ever = [False]
-    last_print = [0.0]       # for throttled terminal output
+    last_print = [0.0]
     frame_counter = [0]
+
+    # ── Z₀ calibration state ─────────────────────────────────────────────
+    # User places CS-100 directly under camera 2, presses 'c' to capture.
+    # We record the raw Y value (vertical in Y-up frame) and compare to
+    # the known real distance (default ~44 inches = 1.118m).
+    z0_real_m = args.z0_inches * 0.0254 if args.z0_inches else None
+    z0_raw = [None]          # raw Y value at calibration moment
+    z0_scale = [1.0]         # scale factor: real / raw
+    z0_calibrated = [False]
+    cal_samples = []         # accumulate samples for averaging
+
+    # ── Print header ─────────────────────────────────────────────────────
+    print("=" * 80)
+    print("  RAW Y-UP PLOTTER  —  Values are exactly as Motive sends them")
+    print("  Motive Y-up convention: X=right, Y=UP, Z=forward (toward camera)")
+    print("=" * 80)
+    if z0_real_m:
+        print(f"  Z₀ calibration enabled: real distance = {args.z0_inches} inches"
+              f" = {z0_real_m:.4f} m")
+        print(f"  Place CS-100 directly under Camera 2, then press 'c' in this")
+        print(f"  terminal to capture the reference. (Averages 30 frames.)")
+    else:
+        print(f"  Tip: use --z0-inches 44 to enable Z₀ distance calibration")
+    print("=" * 80)
+    print()
 
     # ── Set up figure ────────────────────────────────────────────────────
     plt.style.use("dark_background")
-    fig, axes = plt.subplots(4, 1, figsize=(12, 9), sharex=True)
-    fig.suptitle(f"CS-100 Rigid Body: '{BODY_NAME}'  —  Live Pose Data",
-                 fontsize=13, fontweight="bold")
+    fig, axes = plt.subplots(4, 1, figsize=(13, 10), sharex=True)
 
-    # Subplot configs: (ax, label, color, data_lists)
-    configs = [
-        (axes[0], "X position (m)", "#ff6b6b", [xs]),
-        (axes[1], "Y position (m)", "#51cf66", [ys]),
-        (axes[2], "Z position (m)", "#339af0", [zs]),
-        (axes[3], "Quaternion", None, [qxs, qys, qzs, qws]),
-    ]
+    cal_label = " (UNCALIBRATED)" if z0_real_m and not z0_calibrated[0] else ""
+    fig.suptitle(
+        f"RAW Y-up Pose  —  '{BODY_NAME}'{cal_label}",
+        fontsize=13, fontweight="bold")
 
-    lines = []
-    for ax, label, color, data in configs:
-        ax.set_ylabel(label, fontsize=9)
+    # Subplot labels — RAW Y-up axes
+    axes[0].set_ylabel("raw px (m)\n← left / right →", fontsize=9)
+    axes[1].set_ylabel("raw py (m)\n↑ UP (height)", fontsize=9, color="#51cf66")
+    axes[2].set_ylabel("raw pz (m)\n← back / fwd →", fontsize=9)
+    axes[3].set_ylabel("quaternion", fontsize=9)
+    axes[-1].set_xlabel("Time (s)", fontsize=9)
+
+    for ax in axes:
         ax.grid(True, alpha=0.3)
         ax.tick_params(labelsize=8)
 
-        if label == "Quaternion":
-            # 4 lines for qx, qy, qz, qw
-            l_qx, = ax.plot([], [], color="#ff6b6b", linewidth=1, label="qx")
-            l_qy, = ax.plot([], [], color="#51cf66", linewidth=1, label="qy")
-            l_qz, = ax.plot([], [], color="#339af0", linewidth=1, label="qz")
-            l_qw, = ax.plot([], [], color="#ffd43b", linewidth=1.5, label="qw")
-            lines.extend([l_qx, l_qy, l_qz, l_qw])
-            ax.legend(loc="upper left", fontsize=7, ncol=4)
-        else:
-            l, = ax.plot([], [], color=color, linewidth=1.2)
-            lines.append(l)
+    # Create lines
+    l_px, = axes[0].plot([], [], color="#ff6b6b", linewidth=1.2)
+    l_py, = axes[1].plot([], [], color="#51cf66", linewidth=1.5)  # bold — height
+    l_pz, = axes[2].plot([], [], color="#339af0", linewidth=1.2)
 
-    axes[-1].set_xlabel("Time (s)", fontsize=9)
+    l_qx, = axes[3].plot([], [], color="#ff6b6b", linewidth=1, label="qx")
+    l_qy, = axes[3].plot([], [], color="#51cf66", linewidth=1, label="qy")
+    l_qz, = axes[3].plot([], [], color="#339af0", linewidth=1, label="qz")
+    l_qw, = axes[3].plot([], [], color="#ffd43b", linewidth=1.5, label="qw")
+    axes[3].legend(loc="upper left", fontsize=7, ncol=4)
+
+    lines = [l_px, l_py, l_pz, l_qx, l_qy, l_qz, l_qw]
 
     # Status text
     status_text = fig.text(0.02, 0.01, "Waiting for body...",
-                           fontsize=8, color="#aaaaaa",
-                           family="monospace")
+                           fontsize=8, color="#aaaaaa", family="monospace")
 
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+    # ── Terminal input thread (for 'c' key calibration) ──────────────────
+    import threading, select
+    cal_trigger = [False]
+
+    def _input_listener():
+        """Listen for 'c' key press in terminal for Z₀ calibration."""
+        while True:
+            try:
+                line = input()
+                if line.strip().lower() == 'c':
+                    cal_trigger[0] = True
+                    print("[Cal] Capturing Z₀ reference... hold CS-100 steady!")
+            except (EOFError, KeyboardInterrupt):
+                break
+
+    if z0_real_m:
+        t = threading.Thread(target=_input_listener, daemon=True)
+        t.start()
 
     # ── Animation update ─────────────────────────────────────────────────
     def update(frame_num):
@@ -583,17 +629,48 @@ def run_plotter(args):
         client_frames = client.get_frame_count() if hasattr(client, 'get_frame_count') else -1
 
         if body is not None:
-            pos = body.position
-            quat = body.quaternion
+            pos = body.position     # RAW Y-up: [px, py, pz]
+            quat = body.quaternion  # RAW: [qx, qy, qz, qw]
             pos_ok = np.all(np.isfinite(pos)) and np.linalg.norm(pos) < 50.0
             quat_ok = np.all(np.isfinite(quat)) and np.linalg.norm(quat) > 0.1
 
             if pos_ok:
                 body_found_ever[0] = True
+
+                # ── Z₀ calibration capture ───────────────────────────
+                if cal_trigger[0] and z0_real_m:
+                    cal_samples.append(float(pos[1]))  # Y is UP in Y-up
+                    if len(cal_samples) >= 30:
+                        cal_trigger[0] = False
+                        z0_raw[0] = np.mean(cal_samples)
+                        if abs(z0_raw[0]) > 1e-6:
+                            z0_scale[0] = z0_real_m / abs(z0_raw[0])
+                        else:
+                            z0_scale[0] = 1.0
+                        z0_calibrated[0] = True
+                        print(f"\n{'='*60}")
+                        print(f"  Z₀ CALIBRATION COMPLETE")
+                        print(f"  Raw Y (height):   {z0_raw[0]:+.6f}")
+                        print(f"  Real distance:    {z0_real_m:.4f} m "
+                              f"({args.z0_inches} in)")
+                        print(f"  Scale factor:     {z0_scale[0]:.4f}x")
+                        print(f"  (All positions now multiplied by {z0_scale[0]:.2f})")
+                        print(f"{'='*60}\n")
+                        fig.suptitle(
+                            f"RAW Y-up Pose  —  '{BODY_NAME}' "
+                            f"(CALIBRATED: scale={z0_scale[0]:.2f}x)",
+                            fontsize=13, fontweight="bold")
+
+                # Apply scale factor
+                s = z0_scale[0]
+                px_val = float(pos[0]) * s
+                py_val = float(pos[1]) * s
+                pz_val = float(pos[2]) * s
+
                 ts.append(t_now)
-                xs.append(float(pos[0]))
-                ys.append(float(pos[1]))
-                zs.append(float(pos[2]))
+                pxs.append(px_val)
+                pys.append(py_val)
+                pzs.append(pz_val)
 
                 if quat_ok:
                     qxs.append(float(quat[0]))
@@ -609,20 +686,25 @@ def run_plotter(args):
                 # ── Terminal print every 0.5s ────────────────────────
                 if t_now - last_print[0] >= 0.5:
                     last_print[0] = t_now
+                    cal_str = f"  SCALE={z0_scale[0]:.2f}x" if z0_calibrated[0] else "  (raw)"
                     print(
                         f"[{t_now:6.1f}s] "
-                        f"x={pos[0]:+8.4f}  y={pos[1]:+8.4f}  z={pos[2]:+8.4f}  |  "
-                        f"qx={quat[0]:+6.3f} qy={quat[1]:+6.3f} "
-                        f"qz={quat[2]:+6.3f} qw={quat[3]:+6.3f}  |  "
+                        f"px={pos[0]:+.6f}  py={pos[1]:+.6f}  pz={pos[2]:+.6f}  "
+                        f"(Y-up raw) |  "
+                        f"qx={quat[0]:+.4f} qy={quat[1]:+.4f} "
+                        f"qz={quat[2]:+.4f} qw={quat[3]:+.4f}  |  "
                         f"valid={body.tracking_valid}  "
-                        f"nnet_frames={client_frames}"
+                        f"frames={client_frames}{cal_str}"
                     )
 
-                # Status bar on plot
+                # Plot status bar
+                cal_tag = f"scale={z0_scale[0]:.2f}x" if z0_calibrated[0] else "raw"
                 status_text.set_text(
-                    f"TRACKING  |  pos=({pos[0]:+.4f}, {pos[1]:+.4f}, {pos[2]:+.4f})  "
-                    f"quat=({quat[0]:+.3f}, {quat[1]:+.3f}, {quat[2]:+.3f}, {quat[3]:+.3f})  "
-                    f"valid={body.tracking_valid}  |  {t_now:.1f}s  |  NatNet frames: {client_frames}"
+                    f"TRACKING [{cal_tag}]  |  "
+                    f"raw=({pos[0]:+.5f}, {pos[1]:+.5f}, {pos[2]:+.5f})  "
+                    f"quat=({quat[0]:+.3f}, {quat[1]:+.3f}, "
+                    f"{quat[2]:+.3f}, {quat[3]:+.3f})  "
+                    f"|  {t_now:.1f}s  frames={client_frames}"
                 )
                 status_text.set_color("#51cf66")
             else:
@@ -636,10 +718,10 @@ def run_plotter(args):
                 f"Available: {', '.join(names)}  |  {t_now:.1f}s")
             status_text.set_color("#ffd43b")
 
-            # Print to terminal too
             if t_now - last_print[0] >= 1.0:
                 last_print[0] = t_now
-                print(f"[{t_now:6.1f}s] BODY '{BODY_NAME}' NOT FOUND. Available: {', '.join(names)}")
+                print(f"[{t_now:6.1f}s] BODY '{BODY_NAME}' NOT FOUND. "
+                      f"Available: {', '.join(names)}")
 
         # ── Update line data ─────────────────────────────────────────
         if len(ts) > 1:
@@ -647,16 +729,15 @@ def run_plotter(args):
             t_min = max(0, t_list[-1] - WINDOW_SEC)
             t_max = t_list[-1] + 0.5
 
-            # lines[0] = X, [1] = Y, [2] = Z, [3-6] = qx/qy/qz/qw
-            lines[0].set_data(t_list, list(xs))
-            lines[1].set_data(t_list, list(ys))
-            lines[2].set_data(t_list, list(zs))
+            lines[0].set_data(t_list, list(pxs))
+            lines[1].set_data(t_list, list(pys))
+            lines[2].set_data(t_list, list(pzs))
             lines[3].set_data(t_list, list(qxs))
             lines[4].set_data(t_list, list(qys))
             lines[5].set_data(t_list, list(qzs))
             lines[6].set_data(t_list, list(qws))
 
-            for i, ax in enumerate(axes):
+            for ax in axes:
                 ax.set_xlim(t_min, t_max)
                 ax.relim()
                 ax.autoscale_view(scalex=False, scaley=True)
@@ -667,7 +748,8 @@ def run_plotter(args):
     interval_ms = max(16, int(1000 / args.rate))
     anim = FuncAnimation(fig, update, interval=interval_ms, blit=False, cache_frame_data=False)
 
-    print(f"[Plot] Plotting body '{BODY_NAME}' at {args.rate} Hz. Close window to stop.\n")
+    print(f"[Plot] Plotting body '{BODY_NAME}' at {args.rate} Hz.")
+    print(f"[Plot] Close matplotlib window to stop.\n")
     try:
         plt.show()
     except KeyboardInterrupt:
@@ -782,6 +864,9 @@ Examples:
                         help="Plot x, y, z, quat values over time (matplotlib)")
     parser.add_argument("--plot-window", type=int, default=30,
                         help="Seconds of data visible in plot (default: 30)")
+    parser.add_argument("--z0-inches", type=float, default=None,
+                        help="Known camera-to-object distance in inches for Z0 calibration "
+                             "(e.g., 44). Place CS-100 under Camera 2, run --plot, press 'c'.")
     parser.add_argument("--body", default="Rigid_3_Balls",
                         help="Rigid body name to track (default: Rigid_3_Balls)")
     parser.add_argument("--trail-length", type=int, default=2000,
