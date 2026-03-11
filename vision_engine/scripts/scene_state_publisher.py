@@ -529,6 +529,8 @@ def run_plotter(args):
 
     t0 = time.time()
     body_found_ever = [False]
+    last_print = [0.0]       # for throttled terminal output
+    frame_counter = [0]
 
     # ── Set up figure ────────────────────────────────────────────────────
     plt.style.use("dark_background")
@@ -577,6 +579,9 @@ def run_plotter(args):
         bodies = client.get_rigid_bodies()
         body = bodies.get(BODY_NAME)
 
+        frame_counter[0] += 1
+        client_frames = client.get_frame_count() if hasattr(client, 'get_frame_count') else -1
+
         if body is not None:
             pos = body.position
             quat = body.quaternion
@@ -601,11 +606,23 @@ def run_plotter(args):
                     qzs.append(float("nan"))
                     qws.append(float("nan"))
 
-                # Status
+                # ── Terminal print every 0.5s ────────────────────────
+                if t_now - last_print[0] >= 0.5:
+                    last_print[0] = t_now
+                    print(
+                        f"[{t_now:6.1f}s] "
+                        f"x={pos[0]:+8.4f}  y={pos[1]:+8.4f}  z={pos[2]:+8.4f}  |  "
+                        f"qx={quat[0]:+6.3f} qy={quat[1]:+6.3f} "
+                        f"qz={quat[2]:+6.3f} qw={quat[3]:+6.3f}  |  "
+                        f"valid={body.tracking_valid}  "
+                        f"nnet_frames={client_frames}"
+                    )
+
+                # Status bar on plot
                 status_text.set_text(
                     f"TRACKING  |  pos=({pos[0]:+.4f}, {pos[1]:+.4f}, {pos[2]:+.4f})  "
                     f"quat=({quat[0]:+.3f}, {quat[1]:+.3f}, {quat[2]:+.3f}, {quat[3]:+.3f})  "
-                    f"valid={body.tracking_valid}  |  {t_now:.1f}s"
+                    f"valid={body.tracking_valid}  |  {t_now:.1f}s  |  NatNet frames: {client_frames}"
                 )
                 status_text.set_color("#51cf66")
             else:
@@ -618,6 +635,11 @@ def run_plotter(args):
                 f"BODY NOT FOUND: '{BODY_NAME}'  |  "
                 f"Available: {', '.join(names)}  |  {t_now:.1f}s")
             status_text.set_color("#ffd43b")
+
+            # Print to terminal too
+            if t_now - last_print[0] >= 1.0:
+                last_print[0] = t_now
+                print(f"[{t_now:6.1f}s] BODY '{BODY_NAME}' NOT FOUND. Available: {', '.join(names)}")
 
         # ── Update line data ─────────────────────────────────────────
         if len(ts) > 1:
