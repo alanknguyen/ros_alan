@@ -65,6 +65,8 @@ Usage
     python run_3d_trace.py --ip 192.168.0.101 --zup
 """
 
+from __future__ import annotations
+
 import sys
 import time
 import math
