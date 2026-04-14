@@ -1,0 +1,7 @@
+{
+    "extraPaths": [
+        "src/sawyer_vision_tracker/src"
+    ],
+    "pythonVersion": "3.8",
+    "reportMissingImports": "none"
+}

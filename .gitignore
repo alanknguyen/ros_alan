@@ -1,0 +1,18 @@
+# ROS build artifacts
+build/
+devel/
+install/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Snapshots from the live viewer
+snap_*.png
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
